@@ -13,6 +13,7 @@ import (
 	"time"
 
 	pgp "github.com/ProtonMail/gopenpgp/v3/crypto"
+	ical "github.com/emersion/go-ical"
 	"proton-calendar-mcp/internal/proton"
 	"proton-calendar-mcp/internal/vault"
 )
@@ -576,5 +577,87 @@ func TestDeleteEditedOccurrenceRefused(t *testing.T) {
 	}
 	if f.writes != before {
 		t.Fatal("override deletion submitted a partial write")
+	}
+}
+
+func TestPersonalOrganizerMetadataAllowsOccurrenceDeletion(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	in := createInput()
+	in.RecurrenceRule = "FREQ=DAILY;COUNT=3"
+	if _, err := f.service.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	ck, err := f.service.Client.UnlockCalendar(ctx, "calendar1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck.Close()
+	e, err := f.service.open(f.raw, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	organizer := ical.NewProp("ORGANIZER")
+	organizer.Value = "mailto:addr@example.test"
+	e.shared[0].Props.Set(organizer)
+	a, err := renderCard(e.shared[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := renderCard(e.shared[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards, _, err := proton.MakeCards(a, b, ck.Encrypt, ck.Address.Write, ck.Calendar, f.raw.SharedKeyPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.raw.SharedEvents = cards
+	current, err := f.service.Get(ctx, "calendar1", "event1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: in.Start}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := f.service.open(f.raw, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prop(updated.model, "ORGANIZER") != organizer.Value {
+		t.Fatal("organizer metadata lost")
+	}
+	events, err := f.service.List(ctx, ListInput{CalendarID: "calendar1", Start: "2026-10-12T00:00:00+03:00", End: "2026-10-15T00:00:00+03:00"})
+	if err != nil || len(events.Events) != 2 || events.Events[0].Start != "2026-10-13T10:00:00+03:00" {
+		t.Fatal(events, err)
+	}
+}
+
+func TestParticipantMutationGuard(t *testing.T) {
+	for _, kind := range []string{"not-owner", "invite", "attendee-card", "attendee-info", "more-attendees", "signed-attendee", "unverified"} {
+		t.Run(kind, func(t *testing.T) {
+			e := opened{event: Event{Verified: true}, raw: RawEvent{IsOrganizer: 1}, model: component()}
+			switch kind {
+			case "not-owner":
+				e.raw.IsOrganizer = 0
+			case "invite":
+				e.raw.IsProtonProtonInvite = 1
+			case "attendee-card":
+				e.raw.AttendeesEvents = []proton.Card{{Type: 2}}
+			case "attendee-info":
+				e.raw.AttendeesInfo.Attendees = []json.RawMessage{json.RawMessage(`{}`)}
+			case "more-attendees":
+				e.raw.AttendeesInfo.MoreAttendees = 1
+			case "signed-attendee":
+				p := ical.NewProp("ATTENDEE")
+				p.Value = "mailto:guest@example.test"
+				e.model.Props.Add(p)
+			case "unverified":
+				e.event.Verified = false
+			}
+			if err := safeEdit(e); err == nil {
+				t.Fatal("participant or unverified event accepted")
+			}
+		})
 	}
 }

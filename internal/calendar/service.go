@@ -88,7 +88,7 @@ func (s *Service) Calendars(ctx context.Context) ([]Calendar, error) {
 
 type RawEvent struct {
 	ID, CalendarID, UID                                             string
-	IsOrganizer, Permissions                                        int
+	IsOrganizer, Permissions, IsProtonProtonInvite                  int
 	SharedKeyPacket, CalendarKeyPacket, AddressKeyPacket, AddressID string
 	SharedEvents, CalendarEvents, AttendeesEvents                   []proton.Card
 	Notifications                                                   json.RawMessage
@@ -571,9 +571,14 @@ func safeEdit(e opened) error {
 	if !e.event.Verified {
 		return errors.New("event signature could not be verified; refusing mutation")
 	}
-	if e.raw.IsOrganizer != 1 || len(e.raw.AttendeesEvents) > 0 || len(e.raw.AttendeesInfo.Attendees) > 0 || e.raw.AttendeesInfo.MoreAttendees != 0 || prop(e.model, "ORGANIZER") != "" {
-		return errors.New("invitation/participant event mutations are not supported; use Proton's UI")
+	if e.raw.IsOrganizer != 1 {
+		return errors.New("event is not owned by this account as organizer; invitation mutations are not supported")
 	}
+	if e.raw.IsProtonProtonInvite != 0 || len(e.raw.AttendeesEvents) > 0 || len(e.raw.AttendeesInfo.Attendees) > 0 || e.raw.AttendeesInfo.MoreAttendees != 0 || len(e.model.Props.Values("ATTENDEE")) > 0 {
+		return errors.New("event contains participants or invitation data; participant mutations are not supported")
+	}
+	// Proton emits ORGANIZER even for personal events with no attendees.
+	// Ownership and actual attendee/invitation data determine mutation support.
 	return nil
 }
 
