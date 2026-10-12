@@ -9,7 +9,7 @@ import (
 	"proton-calendar-mcp/internal/calendar"
 )
 
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 func New(service *calendar.Service, logger *slog.Logger) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "proton-calendar-mcp", Title: "Proton Calendar", Version: Version}, &mcp.ServerOptions{
@@ -45,15 +45,15 @@ func New(service *calendar.Service, logger *slog.Logger) *mcp.Server {
 		r, err := service.Get(ctx, in.CalendarID, in.EventID)
 		return nil, r, err
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "event_create", Description: "Create an encrypted personal event, optionally recurring, with display reminders. No attendees or invitation emails. request_id is required: identical successful retries return the saved ID, changed arguments are refused, uncertain outcomes require reconciliation.", Annotations: &mcp.ToolAnnotations{IdempotentHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.CreateInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "event_create", Description: "Create an encrypted event, optionally recurring, with display reminders. Optional guests must have Proton accounts: their event copies receive wrapped encryption keys through Proton Calendar sync. No invitation emails or external recipients are supported. Adding guests may notify them through Proton. request_id is required: identical successful retries return the saved ID, changed arguments are refused, uncertain outcomes require reconciliation.", Annotations: &mcp.ToolAnnotations{IdempotentHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.CreateInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
 		r, err := service.Create(ctx, in)
 		return nil, r, err
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "event_update", Description: "Partially edit a verified personal event using its current revision. Omitted fields are preserved. An empty description/location clears it; an empty reminder list clears reminders. Recurring events allow text/reminder changes only; rescheduling a series or occurrence and invitation changes are refused.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.UpdateInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "event_update", Description: "Partially edit a verified event you organize using its current revision. Meetings with guests require send_update_notice=false to preserve guests without sending email. Omitted fields are preserved. An empty description/location clears it; an empty reminder list clears reminders. Recurring events allow text/reminder changes only; rescheduling a series or occurrence and guest-list changes are refused.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.UpdateInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
 		r, err := service.Update(ctx, in)
 		return nil, r, err
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "event_delete", Description: "Delete a verified personal event, or one normal recurring occurrence. For a recurring series, pass occurrence exactly as returned by event_list plus the series event_id and latest expected_revision from event_get. Each deletion changes the series revision: reread before the next deletion. Other occurrences are preserved. For a meeting you organize with guests, explicitly set send_cancellation_notice=false: no cancellation email is sent, but Proton guests may see calendar-sync changes and external guests may retain old copies. Whole-series deletion, separately edited occurrences, and invitations organized by others are refused.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.DeleteInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "event_delete", Description: "Delete a verified organizer event or recurring occurrence, including separately edited occurrences. For a recurring series, pass occurrence exactly as returned by event_list plus the series event_id and latest expected_revision from event_get. Each deletion changes the series revision: reread before the next deletion. Other occurrences are preserved. For a meeting you organize with guests, explicitly set send_cancellation_notice=false: no cancellation email is sent, but Proton guests may see calendar-sync changes and external guests may retain old copies. Use scope=all (omit occurrence) to delete the entire series, or scope=future with occurrence to delete that occurrence and everything after it. Stored exceptions are included. Invitations organized by others are refused.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.DeleteInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
 		r, err := service.Delete(ctx, in)
 		return nil, r, err
 	})
@@ -61,5 +61,6 @@ func New(service *calendar.Service, logger *slog.Logger) *mcp.Server {
 		r, err := service.Changes(ctx, in)
 		return nil, r, err
 	})
+	addCalendarTools(s, service, read, write)
 	return s
 }

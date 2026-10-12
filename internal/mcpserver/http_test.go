@@ -32,7 +32,7 @@ func TestMCPDiscoveryOverAuthenticatedHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 7 {
+	if len(tools.Tools) != 23 {
 		t.Fatal(len(tools.Tools))
 	}
 	if tools.Tools[0].InputSchema == nil {

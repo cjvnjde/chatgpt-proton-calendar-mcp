@@ -29,6 +29,7 @@ type fixture struct {
 	raw                         RawEvent
 	series                      []RawEvent
 	lastMutation                map[string]json.RawMessage
+	lastBatch                   []string
 	writes                      int
 	ambiguous                   bool
 	changes                     any
@@ -99,7 +100,7 @@ func setup(t *testing.T) *fixture {
 	f := &fixture{t: t}
 	f.users = map[string]any{"User": map[string]any{"ID": "account1", "Keys": []proton.KeyRecord{{ID: "uk", PrivateKey: userArmor, Primary: 1, Active: 1, Flags: 3}}}}
 	f.addresses = map[string]any{"Addresses": []proton.Address{{ID: "address1", Email: "addr@example.test", Keys: []proton.KeyRecord{{ID: "ak", PrivateKey: addrArmor, Token: tokenArm, Signature: string(tokenSig), Primary: 1, Active: 1, Flags: 3}}}}}
-	f.bootstrap = map[string]any{"Members": []proton.Member{{ID: "member1", AddressID: "address1", Email: "addr@example.test", Permissions: 31, Flags: 1}}, "Keys": []proton.KeyRecord{{PrivateKey: calArmor, Flags: 3}}, "Passphrase": map[string]any{"MemberPassphrases": []map[string]any{{"MemberID": "member1", "Passphrase": arm, "Signature": string(sig)}}}}
+	f.bootstrap = map[string]any{"CalendarSettings": CalendarSettings{DefaultEventDuration: 30, MakesUserBusy: 1}, "Members": []proton.Member{{ID: "member1", AddressID: "address1", Email: "addr@example.test", Permissions: 31, Flags: 1}}, "Keys": []proton.KeyRecord{{PrivateKey: calArmor, Flags: 3}}, "Passphrase": map[string]any{"MemberPassphrases": []map[string]any{{"MemberID": "member1", "Passphrase": arm, "Signature": string(sig)}}}}
 	old := http.DefaultTransport
 	http.DefaultTransport = transportFunc(f.respond)
 	t.Cleanup(func() { http.DefaultTransport = old; user.ClearPrivateParams(); addr.ClearPrivateParams() })
@@ -140,8 +141,25 @@ func (f *fixture) respond(req *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			f.t.Fatal(err)
 		}
-		if body.MemberID != "member1" || len(body.Events) != 1 {
+		if body.MemberID != "member1" || len(body.Events) == 0 {
 			f.t.Fatal("invalid sync")
+		}
+		f.lastBatch = nil
+		responses := []any{}
+		for i, item := range body.Events {
+			f.lastBatch = append(f.lastBatch, item.ID)
+			id := item.ID
+			if id == "" {
+				id = "event1"
+			}
+			responses = append(responses, map[string]any{"Index": i, "Response": map[string]any{"Code": 1000, "Event": map[string]string{"ID": id}}})
+			if item.Event == nil && item.ID != "event1" {
+				for j := len(f.series) - 1; j >= 0; j-- {
+					if f.series[j].ID == item.ID {
+						f.series = append(f.series[:j], f.series[j+1:]...)
+					}
+				}
+			}
 		}
 		op := body.Events[0]
 		f.lastMutation = op.Event
@@ -160,13 +178,19 @@ func (f *fixture) respond(req *http.Request) (*http.Response, error) {
 				json.Unmarshal(p, &f.raw.CalendarEvents)
 			}
 			json.Unmarshal(op.Event["IsOrganizer"], &f.raw.IsOrganizer)
+			if value := op.Event["AttendeesEventContent"]; len(value) > 0 {
+				json.Unmarshal(value, &f.raw.AttendeesEvents)
+			}
+			if value := op.Event["Attendees"]; len(value) > 0 {
+				json.Unmarshal(value, &f.raw.AttendeesInfo.Attendees)
+			}
 			f.raw.Notifications = op.Event["Notifications"]
 			f.raw.Color = op.Event["Color"]
 		}
 		if f.ambiguous {
 			return nil, errors.New("lost reply with secret internal details")
 		}
-		value = map[string]any{"Responses": []any{map[string]any{"Index": 0, "Response": map[string]any{"Code": 1000, "Event": map[string]string{"ID": "event1"}}}}}
+		value = map[string]any{"Responses": responses}
 	case "/calendar/v1/calendar1/events/event1":
 		value = map[string]any{"Event": f.raw}
 	case "/calendar/v1/events", "/calendar/v1/calendar1/events":
@@ -533,7 +557,7 @@ func TestDeleteOccurrenceAcrossDSTAndAllDay(t *testing.T) {
 	}
 }
 
-func TestDeleteEditedOccurrenceRefused(t *testing.T) {
+func TestDeleteEditedOccurrenceBatch(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	in := createInput()
@@ -574,11 +598,34 @@ func TestDeleteEditedOccurrenceRefused(t *testing.T) {
 	f.series = []RawEvent{f.raw, override}
 	before := f.writes
 	_, err = f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: e.event.Revision, Occurrence: in.Start})
-	if err == nil || !strings.Contains(err.Error(), "edited separately") {
+	if err != nil {
 		t.Fatal(err)
 	}
-	if f.writes != before {
-		t.Fatal("override deletion submitted a partial write")
+	if f.writes != before+1 || len(f.lastBatch) != 2 || f.lastBatch[0] != "event1" || f.lastBatch[1] != "override1" {
+		t.Fatal("master exclusion and override deletion must share one batch", f.lastBatch)
+	}
+	if len(f.series) != 1 {
+		t.Fatal("override was not removed")
+	}
+	current, err := f.service.Get(ctx, "calendar1", "event1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.RecurrenceRule != in.RecurrenceRule {
+		t.Fatal("changed recurrence rule")
+	}
+	ck2, err := f.service.Client.UnlockCalendar(ctx, "calendar1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck2.Close()
+	record, err := f.service.open(f.raw, ck2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := expand(ctx, []opened{record}, at, at.AddDate(0, 0, 3), f.service.Location)
+	if err != nil || len(instances) != 2 {
+		t.Fatal("other dates were not preserved", err, len(instances))
 	}
 }
 
@@ -765,5 +812,67 @@ func TestSilentGuestOccurrenceDeletion(t *testing.T) {
 	}
 	if f.writes != writes {
 		t.Fatal("unsafe write submitted")
+	}
+}
+
+func TestDeleteSeriesScopes(t *testing.T) {
+	for _, scope := range []string{"all", "future"} {
+		t.Run(scope, func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			in := createInput()
+			in.RecurrenceRule = "FREQ=DAILY;COUNT=5"
+			if _, err := f.service.Create(ctx, in); err != nil {
+				t.Fatal(err)
+			}
+			e, err := f.service.Get(ctx, "calendar1", "event1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			del := DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: e.Revision, Scope: scope}
+			if scope == "future" {
+				del.Occurrence = "2026-10-15T10:00:00+03:00"
+			}
+			if _, err := f.service.Delete(ctx, del); err != nil {
+				t.Fatal(err)
+			}
+			if scope == "all" {
+				if f.raw.ID != "" {
+					t.Fatal("series remains")
+				}
+				return
+			}
+			rows, err := f.service.List(ctx, ListInput{CalendarID: "calendar1", Start: "2026-10-12T00:00:00+03:00", End: "2026-10-20T00:00:00+03:00"})
+			if err != nil || len(rows.Events) != 3 {
+				t.Fatal("wrong retained dates", err, rows)
+			}
+			for _, e := range rows.Events {
+				if e.Start >= "2026-10-15" {
+					t.Fatal("future date remains", e.Start)
+				}
+			}
+		})
+	}
+}
+
+func TestTruncateDoesNotExtendCountWhenCutoffIsRDate(t *testing.T) {
+	c := component()
+	start := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	setTimes(c, start, start.Add(time.Hour), false)
+	rule := ical.NewProp("RRULE")
+	rule.Value = "FREQ=DAILY;COUNT=2"
+	c.Props.Set(rule)
+	extra := ical.NewProp("RDATE")
+	extra.SetDateTime(start.AddDate(0, 0, 10))
+	c.Props.Add(extra)
+	if err := truncateRecurrence(c, start.AddDate(0, 0, 10), time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	set, err := recurrence(c, start, start.AddDate(0, 0, 30), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(set.All()); n != 2 {
+		t.Fatalf("truncation expanded an ended series to %d events", n)
 	}
 }

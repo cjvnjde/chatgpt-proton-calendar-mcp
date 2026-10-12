@@ -153,6 +153,20 @@ func (s *Service) open(raw RawEvent, ck *proton.CalendarKeys) (opened, error) {
 			parts = append(parts, c)
 		}
 	}
+	if len(raw.AttendeesEvents) > 0 {
+		ts, v, err := proton.OpenCards(raw.AttendeesEvents, packet, decKR, ck.Address.Verify)
+		if err != nil {
+			return opened{}, err
+		}
+		verified = verified && v
+		for _, t := range ts {
+			part, err := parseCard(t)
+			if err != nil {
+				return opened{}, err
+			}
+			parts = append(parts, part)
+		}
+	}
 	model, err := merge(parts)
 	if err != nil {
 		return opened{}, err
@@ -163,6 +177,40 @@ func (s *Service) open(raw RawEvent, ck *proton.CalendarKeys) (opened, error) {
 	}
 	if raw.UID != "" && ev.UID != raw.UID {
 		return opened{}, errors.New("event metadata disagrees with signed UID")
+	}
+	ev.Organizer = strings.TrimPrefix(strings.TrimPrefix(prop(model, "ORGANIZER"), "mailto:"), "MAILTO:")
+	ev.AttendeesComplete = raw.AttendeesInfo.MoreAttendees == 0
+	statuses := map[string]int{}
+	for _, value := range raw.AttendeesInfo.Attendees {
+		var a struct {
+			Token  string
+			Status int
+		}
+		if json.Unmarshal(value, &a) != nil {
+			return opened{}, errors.New("invalid attendee metadata")
+		}
+		statuses[a.Token] = a.Status
+	}
+	for _, a := range model.Props.Values("ATTENDEE") {
+		status := a.Params.Get("PARTSTAT")
+		if n, ok := statuses[a.Params.Get("X-PM-TOKEN")]; ok {
+			switch n {
+			case 0:
+				status = "NEEDS-ACTION"
+			case 1:
+				status = "TENTATIVE"
+			case 2:
+				status = "DECLINED"
+			case 3:
+				status = "ACCEPTED"
+			default:
+				status = "UNKNOWN"
+			}
+		}
+		ev.Attendees = append(ev.Attendees, Attendee{Email: strings.TrimPrefix(strings.TrimPrefix(a.Value, "mailto:"), "MAILTO:"), Name: a.Params.Get("CN"), Role: a.Params.Get("ROLE"), Status: status})
+	}
+	if len(ev.Attendees) != len(raw.AttendeesInfo.Attendees) {
+		ev.AttendeesComplete = false
 	}
 	return opened{raw, model, shared, ev}, nil
 }
@@ -316,6 +364,8 @@ func (s *Service) List(ctx context.Context, in ListInput) (ListResult, error) {
 }
 
 type CreateInput struct {
+	Guests []GuestInput `json:"guests,omitempty" jsonschema:"Optional Proton-account guests. Calendar delivery uses encrypted Proton sync; external recipients and invitation email delivery are not supported."`
+
 	CalendarID      string `json:"calendar_id"`
 	RequestID       string `json:"request_id" jsonschema:"Unique stable request ID; reuse exactly the same ID and arguments on retries"`
 	Title           string `json:"title"`
@@ -412,6 +462,18 @@ func (s *Service) writable(ctx context.Context, id string, ck *proton.CalendarKe
 }
 
 func (s *Service) sync(ctx context.Context, cal, member string, op map[string]any) (string, error) {
+	ids, err := s.syncBatch(ctx, cal, member, []map[string]any{op})
+	if err != nil {
+		return "", err
+	}
+	return ids[0], nil
+}
+
+// A batch can fail after some entries were applied. Never retry it automatically.
+func (s *Service) syncBatch(ctx context.Context, cal, member string, ops []map[string]any) ([]string, error) {
+	if len(ops) == 0 || len(ops) > 100 {
+		return nil, errors.New("sync requires 1-100 operations")
+	}
 	var result struct {
 		Responses []struct {
 			Index    int
@@ -421,31 +483,43 @@ func (s *Service) sync(ctx context.Context, cal, member string, op map[string]an
 			}
 		}
 	}
-	err := s.Client.Do(ctx, "PUT", "/calendar/v1/"+cal+"/events/sync", nil, map[string]any{"MemberID": member, "Events": []any{op}}, &result)
-	if err != nil {
-		return "", err
+	if err := s.Client.Do(ctx, "PUT", "/calendar/v1/"+cal+"/events/sync", nil, map[string]any{"MemberID": member, "Events": ops}, &result); err != nil {
+		return nil, err
 	}
-	if len(result.Responses) != 1 || result.Responses[0].Index != 0 {
-		return "", errors.New("incomplete sync acknowledgement; inspect current state")
+	if len(result.Responses) != len(ops) {
+		return nil, errors.New("incomplete sync acknowledgement; inspect current state before any retry")
 	}
-	r := result.Responses[0].Response
-	if r.Code != 1000 && r.Code != 1001 {
-		return "", errors.New("Proton refused the event mutation")
+	ids := make([]string, len(ops))
+	seen := make([]bool, len(ops))
+	for _, r := range result.Responses {
+		if r.Index < 0 || r.Index >= len(ops) || seen[r.Index] {
+			return nil, errors.New("invalid sync acknowledgement; inspect current state")
+		}
+		seen[r.Index] = true
+		if r.Response.Code != 1000 && r.Response.Code != 1001 {
+			return nil, errors.New("Proton refused a batch entry; other entries may have applied, inspect current state")
+		}
+		if _, writing := ops[r.Index]["Event"]; writing {
+			id := r.Response.Event.ID
+			if !ValidID(id) {
+				return nil, errors.New("missing event ID in sync acknowledgement; inspect current state")
+			}
+			if expected, ok := ops[r.Index]["ID"].(string); ok && expected != id {
+				return nil, errors.New("sync acknowledged a different event; inspect current state")
+			}
+			ids[r.Index] = id
+		}
 	}
-	id := r.Event.ID
-	if _, deleting := op["Event"]; !deleting {
-		return "", nil
-	}
-	if !ValidID(id) {
-		return "", errors.New("missing event ID in sync acknowledgement; inspect current state")
-	}
-	return id, nil
+	return ids, nil
 }
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (WriteResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.allowed(in.CalendarID); err != nil {
+		return WriteResult{}, err
+	}
+	if err := validateGuests(in.Guests); err != nil {
 		return WriteResult{}, err
 	}
 	if !requestIDPattern.MatchString(in.RequestID) {
@@ -518,6 +592,11 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (WriteResult, erro
 	encrypted.Props.SetText("DESCRIPTION", in.Description)
 	encrypted.Props.SetText("LOCATION", in.Location)
 	personal.Props.SetText("STATUS", "CONFIRMED")
+	if len(in.Guests) > 0 {
+		organizer := ical.NewProp("ORGANIZER")
+		organizer.Value = "mailto:" + ck.Member.Email
+		signed.Props.Set(organizer)
+	}
 	signedText, err := renderCard(signed)
 	if err != nil {
 		return WriteResult{}, err
@@ -538,11 +617,21 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (WriteResult, erro
 	if err != nil {
 		return WriteResult{}, errors.New("cannot sign calendar part")
 	}
+	guestObject := map[string]any{}
+	if len(in.Guests) > 0 {
+		guestObject, err = s.guestData(ctx, uid, packet, stamp, in.Guests, ck)
+		if err != nil {
+			return WriteResult{}, err
+		}
+	}
 	op := vault.Operation{Fingerprint: fp, UID: uid, CalendarID: in.CalendarID}
 	if err := s.Client.SaveOperation(opID, op); err != nil {
 		return WriteResult{}, err
 	}
 	object := map[string]any{"Permissions": 1, "IsOrganizer": 1, "SharedEventContent": cards, "SharedKeyPacket": packet, "CalendarEventContent": []proton.Card{card}, "Notifications": notifications, "Color": nil}
+	for name, value := range guestObject {
+		object[name] = value
+	}
 	id, err := s.sync(ctx, in.CalendarID, ck.Member.ID, map[string]any{"Overwrite": 0, "Event": object})
 	if err != nil {
 		return WriteResult{}, err
@@ -555,6 +644,8 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (WriteResult, erro
 }
 
 type UpdateInput struct {
+	SendUpdateNotice *bool `json:"send_update_notice,omitempty" jsonschema:"For organizer meetings with existing guests, explicitly false allows updates without email. True is not yet supported; Proton guests may see sync updates."`
+
 	CalendarID       string  `json:"calendar_id"`
 	EventID          string  `json:"event_id"`
 	ExpectedRevision string  `json:"expected_revision" jsonschema:"Exact revision from event_get; refuses if event changed"`
@@ -614,7 +705,20 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (WriteResult, erro
 	if in.ExpectedRevision == "" || e.event.Revision != in.ExpectedRevision {
 		return WriteResult{}, errors.New("event changed; read it again before editing")
 	}
-	if err := safeEdit(e); err != nil {
+	if in.SendUpdateNotice != nil && *in.SendUpdateNotice {
+		return WriteResult{}, errors.New("sending update notices is not yet supported")
+	}
+	if hasParticipants(e) {
+		if !e.event.Verified || e.raw.IsOrganizer != 1 {
+			return WriteResult{}, errors.New("updates require a verified meeting you organize")
+		}
+		if in.SendUpdateNotice == nil {
+			return WriteResult{}, errors.New("meeting has guests; explicitly set send_update_notice=false for a silent update")
+		}
+		if _, err := preservedParticipants(e, ck); err != nil {
+			return WriteResult{}, err
+		}
+	} else if err := safeEdit(e); err != nil {
 		return WriteResult{}, err
 	}
 	if len(e.shared) != 2 || raw.SharedEvents[0].Type != 2 || raw.SharedEvents[1].Type != 3 {
@@ -659,9 +763,24 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (WriteResult, erro
 
 // writeEdited preserves existing encrypted card layout and unrelated metadata.
 func (s *Service) writeEdited(ctx context.Context, e opened, ck *proton.CalendarKeys, reminderMinutes *[]int) (WriteResult, error) {
+	object, err := s.editedObject(e, ck, reminderMinutes)
+	if err != nil {
+		return WriteResult{}, err
+	}
+	id, err := s.sync(ctx, e.raw.CalendarID, ck.Member.ID, map[string]any{"ID": e.raw.ID, "Event": object})
+	if err != nil {
+		return WriteResult{}, err
+	}
+	return WriteResult{id, e.raw.CalendarID, e.event.UID, false}, nil
+}
+
+func (s *Service) editedObject(e opened, ck *proton.CalendarKeys, reminderMinutes *[]int) (map[string]any, error) {
 	raw := e.raw
+	if raw.SharedKeyPacket == "" {
+		return nil, errors.New("organizer event has no reusable shared key packet")
+	}
 	if len(e.shared) != 2 || len(raw.SharedEvents) != 2 || raw.SharedEvents[0].Type != 2 || raw.SharedEvents[1].Type != 3 {
-		return WriteResult{}, errors.New("unsupported event card layout; refusing to rewrite it")
+		return nil, errors.New("unsupported event card layout; refusing to rewrite it")
 	}
 	seq, _ := strconv.Atoi(prop(e.shared[0], "SEQUENCE"))
 	p := ical.NewProp("SEQUENCE")
@@ -673,15 +792,15 @@ func (s *Service) writeEdited(ctx context.Context, e opened, ck *proton.Calendar
 	}
 	a, err := renderCard(e.shared[0])
 	if err != nil {
-		return WriteResult{}, err
+		return nil, err
 	}
 	b, err := renderCard(e.shared[1])
 	if err != nil {
-		return WriteResult{}, err
+		return nil, err
 	}
 	cards, _, err := proton.MakeCards(a, b, ck.Encrypt, ck.Address.Write, ck.Calendar, raw.SharedKeyPacket)
 	if err != nil {
-		return WriteResult{}, errors.New("cannot encrypt/sign update")
+		return nil, errors.New("cannot encrypt/sign update")
 	}
 	notifications := raw.Notifications
 	if len(notifications) == 0 {
@@ -690,7 +809,7 @@ func (s *Service) writeEdited(ctx context.Context, e opened, ck *proton.Calendar
 	if reminderMinutes != nil {
 		notifications, err = reminders(*reminderMinutes)
 		if err != nil {
-			return WriteResult{}, err
+			return nil, err
 		}
 	}
 	color := raw.Color
@@ -701,24 +820,18 @@ func (s *Service) writeEdited(ctx context.Context, e opened, ck *proton.Calendar
 	if hasParticipants(e) {
 		participantData, err := preservedParticipants(e, ck)
 		if err != nil {
-			return WriteResult{}, err
+			return nil, err
 		}
 		for key, value := range participantData {
 			object[key] = value
 		}
 	}
 
-	id, err := s.sync(ctx, raw.CalendarID, ck.Member.ID, map[string]any{"ID": raw.ID, "Event": object})
-	if err != nil {
-		return WriteResult{}, err
-	}
-	if id != raw.ID {
-		return WriteResult{}, errors.New("update acknowledged a different event; inspect current state")
-	}
-	return WriteResult{id, raw.CalendarID, e.event.UID, false}, nil
+	return object, nil
 }
 
 type DeleteInput struct {
+	Scope                  string `json:"scope,omitempty" jsonschema:"single (default), all, or future. all deletes the entire series including stored exceptions; future deletes the chosen occurrence and all later occurrences."`
 	SendCancellationNotice *bool  `json:"send_cancellation_notice,omitempty" jsonschema:"For meetings you organize with guests, explicitly set false to delete an occurrence without sending cancellation email. True is unsupported. Proton guests may still see calendar-sync changes; external guests may retain old copies."`
 	Occurrence             string `json:"occurrence,omitempty" jsonschema:"Exact occurrence value from event_list. Required for recurring series; deletes only that occurrence. Use the series event_id and its latest revision."`
 	CalendarID             string `json:"calendar_id"`
@@ -754,9 +867,9 @@ func (s *Service) Delete(ctx context.Context, in DeleteInput) (WriteResult, erro
 	if in.SendCancellationNotice != nil && *in.SendCancellationNotice {
 		return WriteResult{}, errors.New("sending cancellation notices is not supported")
 	}
-	if hasParticipants(e) && in.Occurrence != "" {
+	if hasParticipants(e) {
 		if !e.event.Verified || e.raw.IsOrganizer != 1 {
-			return WriteResult{}, errors.New("silent occurrence deletion requires a verified meeting you organize")
+			return WriteResult{}, errors.New("silent deletion requires a verified meeting you organize")
 		}
 		if in.SendCancellationNotice == nil {
 			return WriteResult{}, errors.New("meeting has guests; explicitly set send_cancellation_notice=false to delete without cancellation email")
@@ -764,11 +877,22 @@ func (s *Service) Delete(ctx context.Context, in DeleteInput) (WriteResult, erro
 	} else if err := safeEdit(e); err != nil {
 		return WriteResult{}, err
 	}
+	if in.Scope != "" && in.Scope != "single" && in.Scope != "all" && in.Scope != "future" {
+		return WriteResult{}, errors.New("scope must be single, all, or future")
+	}
+	if in.Scope == "all" || in.Scope == "future" {
+		return s.deleteSeriesScope(ctx, in, e, ck)
+	}
 	if in.Occurrence != "" {
 		return s.deleteOccurrence(ctx, in, e, ck)
 	}
 	if prop(e.model, "RRULE") != "" || len(e.model.Props.Values("RDATE")) > 0 || prop(e.model, "RECURRENCE-ID") != "" {
 		return WriteResult{}, errors.New("recurring-event deletion requires occurrence from event_list; whole-series deletion is not supported")
+	}
+	if hasParticipants(e) {
+		if _, err := preservedParticipants(e, ck); err != nil {
+			return WriteResult{}, err
+		}
 	}
 	if _, err := s.sync(ctx, in.CalendarID, ck.Member.ID, map[string]any{"ID": in.EventID}); err != nil {
 		return WriteResult{}, err

@@ -3,6 +3,7 @@ package proton
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 
 	"github.com/ProtonMail/go-srp"
@@ -231,14 +232,17 @@ func (c *Client) DeriveKeyPassword(ctx context.Context, password []byte) error {
 
 type Member struct {
 	ID, AddressID, Email, Name, Color, Description string
-	Permissions, Flags                             int
+	Permissions, Flags, Display                    int
 }
 type CalendarKeys struct {
-	Calendar *pgp.KeyRing
-	Encrypt  *pgp.KeyRing
-	Address  Rings
-	Member   Member
-	Identity *Identity
+	Settings          json.RawMessage
+	PassphraseMessage string
+	PassphraseID      string
+	Calendar          *pgp.KeyRing
+	Encrypt           *pgp.KeyRing
+	Address           Rings
+	Member            Member
+	Identity          *Identity
 }
 
 func (k *CalendarKeys) Close() { k.Calendar.ClearPrivateParams(); k.Identity.Close() }
@@ -255,9 +259,11 @@ func (c *Client) UnlockCalendar(ctx context.Context, id string) (*CalendarKeys, 
 		}
 	}()
 	var b struct {
-		Members    []Member
-		Keys       []KeyRecord
-		Passphrase struct {
+		CalendarSettings json.RawMessage
+		Members          []Member
+		Keys             []KeyRecord
+		Passphrase       struct {
+			ID                string
 			MemberPassphrases []struct{ MemberID, Passphrase, Signature string }
 		}
 	}
@@ -277,10 +283,12 @@ func (c *Client) UnlockCalendar(ctx context.Context, id string) (*CalendarKeys, 
 		return nil, errors.New("no matching calendar membership")
 	}
 	var pass []byte
+	var passMessage string
 	for _, p := range b.Passphrase.MemberPassphrases {
 		if p.MemberID != member.ID {
 			continue
 		}
+		passMessage = p.Passphrase
 		pass, err = decrypt(addr.Read, []byte(p.Passphrase), pgp.Armor, false)
 		if err != nil || verify(addr.Verify, pass, p.Signature, false) != nil {
 			clear(pass)
@@ -318,7 +326,7 @@ func (c *Client) UnlockCalendar(ctx context.Context, id string) (*CalendarKeys, 
 		return nil, errors.New("calendar keys could not be unlocked")
 	}
 	ok = true
-	return &CalendarKeys{r, w, addr, member, i}, nil
+	return &CalendarKeys{Calendar: r, Encrypt: w, Address: addr, Member: member, Identity: i, PassphraseMessage: passMessage, PassphraseID: b.Passphrase.ID, Settings: b.CalendarSettings}, nil
 }
 
 type Card struct {

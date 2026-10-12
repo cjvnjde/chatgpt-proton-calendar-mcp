@@ -41,7 +41,7 @@ func TestCLIStdioDiscovery(t *testing.T) {
 	}
 	defer session.Close()
 	result, err := session.ListTools(ctx, nil)
-	if err != nil || len(result.Tools) != 7 {
+	if err != nil || len(result.Tools) != 23 {
 		t.Fatal(result, err)
 	}
 }
@@ -139,7 +139,7 @@ func TestHTTPWaitsForTerminalLogin(t *testing.T) {
 	}
 	defer session.Close()
 	result, err := session.ListTools(ctx, nil)
-	if err != nil || len(result.Tools) != 7 {
+	if err != nil || len(result.Tools) != 23 {
 		t.Fatal(result, err)
 	}
 	if v, err := vault.Open(path, key); err == nil {

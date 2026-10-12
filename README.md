@@ -6,17 +6,26 @@ Supports local stdio, authenticated Streamable HTTP, an optional OpenAI Secure M
 
 ## Features
 
-| Tool | Behavior |
-|---|---|
-| `calendars_list` | Discover accessible calendars and write permissions. |
-| `event_list` | Date-range lookup, text search, pagination, all-day events, and recurring occurrences with exclusions and stored overrides. |
-| `event_get` | Read a stored event and its revision/signature status. |
-| `event_create` | Create encrypted personal events, optional daily/weekly/monthly/yearly recurrence, and display reminders. Stable request IDs prevent duplicate submissions. |
-| `event_update` | Partial text, time, and reminder edits with a revision check. Preserve omitted properties and the existing encryption session key. |
-| `event_delete` | Delete personal events or individual normal recurring occurrences; organizer meetings with guests require explicit no-email mode. |
-| `event_changes` | Poll Proton's native created/updated/deleted event feed using a caller-owned cursor. |
+Version **0.4.0** exposes 23 tools. Call `capabilities` to check the deployed version and supported operations before planning a mutation. This release expands the implementation; **it does not yet provide full Proton Calendar parity**.
 
-This is a first implementation, not a Proton-supported integration. No live account has been used to validate it yet. Synthetic tests exercise the native protocol and cryptographic round trips; use a dedicated test calendar before granting access to production calendars.
+| Area | Tools and behavior |
+|---|---|
+| Discovery | `capabilities`, `calendars_list`, `addresses_list` |
+| Events | `event_list`, `event_get`, `event_create`, `event_update`, `event_delete`, `event_changes` |
+| Calendar administration | `calendar_get`, `calendar_create`, `calendar_update`, `calendar_settings_update`, `calendar_delete` |
+| Calendar sharing | `calendar_members`, `calendar_share`, `calendar_access_update` |
+| Public ICS links | `calendar_links`, `calendar_link_create`, `calendar_link_get`, `calendar_link_delete` |
+| ICS transfer | `event_export`, `events_import` |
+
+Event creation supports optional Proton-account guests: their copies receive the shared encryption key through Proton Calendar sync. The guest list is encrypted and signed. **No invitation email is sent**; external recipients are refused before writing the event. Guest meetings you organize can be updated or deleted with explicit no-email options. Cancellation or update email delivery remains unsupported.
+
+Delete one recurring occurrence (including a separately edited instance), the entire series, or the selected occurrence and all future occurrences. Full-series operations fetch and verify the complete series before submitting one sync batch. A failed batch may have partially applied; never automatically retry it.
+
+Calendar creation generates encrypted calendar keys and supports HTTPS ICS subscriptions fetched by Proton. Creation requires an unrestricted calendar allowlist. Use a stable request ID: uncertain creation is blocked from replay, and a key-setup failure reports the created calendar ID for operator recovery.
+
+Sharing a calendar grants access to its entire contents. Public links are bearer credentials: listing links omits usable URLs; retrieving or creating one explicitly returns it. A full-access public link allows Proton to decrypt the exported feed. Sharing keys are checked against Proton's published primary keys; Key Transparency and contact-pinned-key verification are not implemented.
+
+New operations have synthetic protocol and cryptographic tests, but still need live-account validation. Existing login and event reading have been exercised by the operator. Use a dedicated test calendar when validating new write paths.
 
 ## Local setup
 
@@ -67,8 +76,9 @@ Monitoring is pull-based. The MCP server does not wake an inactive AI, create a 
 
 ## Current boundaries
 
-- Writes target personal events without attendees or an organizer. Invitation handling, participant emails, sharing, booking pages, calendar administration, and cross-calendar moves are not exposed.
-- Recurring series can be created and read. Text/reminder edits preserve the existing rule and exclusions. Delete a normal recurring occurrence by passing its exact `occurrence` from `event_list`, the series ID, and a fresh revision from `event_get`. This adds an EXDATE and preserves other dates. Reread the revision between deletions. For a meeting you organize with guests, also pass `send_cancellation_notice: false`. The server preserves verified guest cards and responses, adds the exclusion, and sends no cancellation email. Proton guests may still see calendar-sync changes; external guests may retain old copies. Received invitations, incomplete/unverified guest lists, whole-series deletion, deletion of separately edited occurrences, rescheduling, and splitting a series remain unsupported.
+- Guest creation currently supports Proton recipients through Calendar sync. Invitation/update/cancellation emails, external guest creation, guest-list changes on existing events, RSVP, accepting calendar-sharing invitations, cross-calendar moves, booking pages and video conferencing remain unsupported. A request to send a cancellation notice is rejected; it is never silently treated as no-email mode.
+- Recurring series can be created and read. Text/reminder edits preserve the rule and exclusions. For one deletion pass the exact `occurrence` from `event_list`, the master series ID and its current revision. Stored exceptions are deleted in the same batch as the master exclusion. `scope: "all"` deletes the entire series; `scope: "future"` with an occurrence truncates the master and removes future exceptions. Organizer guest events require `send_cancellation_notice: false`; updates require `send_update_notice: false`. Proton guests may see sync changes despite no email. Recurring rescheduling/splitting remains unsupported.
+- `event_export` exports a stored event or its entire verified recurrence series, including exceptions outside the displayed date range. `events_import` creates new personal events with new UIDs. Import supports basic fields and RRULE; guests, exclusions, stored exceptions, alarms and custom VTIMEZONE components are rejected before any writes. It is not a full-fidelity backup/restore facility. Partial remote failures are reported with acknowledged results and the failing index.
 - Date queries use an inclusive start and exclusive end, with at most 90 days per query. All-day end dates are exclusive. Provide RFC3339 timestamps with explicit offsets and an IANA timezone for timed recurring events.
 - IANA timezones are supported, with a bundled timezone database for legacy aliases such as `Europe/Kiev`; arbitrary custom VTIMEZONE definitions and `RANGE` overrides are refused. Dense subdaily rules and subdaily selectors are refused. Expansion and upstream pagination limits produce an error rather than a silently incomplete schedule.
 - Signatures are checked against this account's address keys. Events signed by other people can be read with `verified: false`; they cannot be edited/deleted. This is cryptographic verification against fetched account keys, not a Key Transparency implementation.

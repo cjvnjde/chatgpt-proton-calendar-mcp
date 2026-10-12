@@ -14,7 +14,18 @@ import (
 	"github.com/teambition/rrule-go"
 )
 
+type Attendee struct {
+	Email  string `json:"email"`
+	Name   string `json:"name,omitempty"`
+	Role   string `json:"role,omitempty"`
+	Status string `json:"status"`
+}
+
 type Event struct {
+	Organizer         string     `json:"organizer,omitempty"`
+	Attendees         []Attendee `json:"attendees,omitempty"`
+	AttendeesComplete bool       `json:"attendees_complete"`
+
 	ID             string `json:"id"`
 	CalendarID     string `json:"calendar_id"`
 	UID            string `json:"uid"`
