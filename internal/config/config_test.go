@@ -9,8 +9,8 @@ func TestSecureConfigDefaultsAndTunnelIsolation(t *testing.T) {
 	for _, key := range []string{"MCP_TRANSPORT", "MCP_HTTP_ADDR", "MCP_TUNNEL_ADDR", "MCP_BEARER_TOKEN", "MCP_TUNNEL_TOKEN", "MCP_BEARER_TOKEN_FILE", "MCP_TUNNEL_TOKEN_FILE", "PROTON_VAULT_KEY", "PROTON_VAULT_KEY_FILE", "PROTON_CALENDAR_IDS", "MCP_ALLOWED_HOSTS", "PROTON_TIMEZONE"} {
 		t.Setenv(key, "")
 	}
-	if _, err := Load(true); err == nil {
-		t.Fatal("missing allowlist accepted")
+	if c, err := Load(true); err != nil || len(c.Allowed) != 0 {
+		t.Fatal("empty calendar IDs should allow all calendars", c, err)
 	}
 	t.Setenv("PROTON_CALENDAR_IDS", "calendar1")
 	c, err := Load(true)

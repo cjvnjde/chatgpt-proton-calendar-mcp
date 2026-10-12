@@ -2,13 +2,13 @@
 
 A Go MCP server for a single Proton account, using Proton's **undocumented internal protocol**, implemented directly in this repository. It does not execute a community CLI, require Proton Mail Bridge, or publish a calendar subscription link.
 
-Supports local stdio, authenticated Streamable HTTP, an optional OpenAI Secure MCP Tunnel, and Dokploy. Only explicitly allowlisted calendars are accessible to the AI.
+Supports local stdio, authenticated Streamable HTTP, an optional OpenAI Secure MCP Tunnel, and Dokploy. By default, all calendars accessible to your Proton account are available to the AI. Set `PROTON_CALENDAR_IDS` to restrict access to selected calendars.
 
 ## Features
 
 | Tool | Behavior |
 |---|---|
-| `calendars_list` | Discover allowlisted calendars and write permissions. |
+| `calendars_list` | Discover accessible calendars and write permissions. |
 | `event_list` | Date-range lookup, text search, pagination, all-day events, and recurring occurrences with exclusions and stored overrides. |
 | `event_get` | Read a stored event and its revision/signature status. |
 | `event_create` | Create encrypted personal events, optional daily/weekly/monthly/yearly recurrence, and display reminders. Stable request IDs prevent duplicate submissions. |
@@ -33,7 +33,7 @@ Login prompts for the account password and, if needed, a TOTP code and separate 
 
 Legacy unsalted account keys are refused because supporting them would require persisting the original mailbox/account password instead of a derived passphrase.
 
-Choose exact IDs from `calendars`, then configure your MCP client:
+Configure your MCP client below. Leave `PROTON_CALENDAR_IDS` empty for all calendars, or optionally choose exact IDs from `calendars` to restrict access:
 
 ```json
 {
@@ -45,7 +45,7 @@ Choose exact IDs from `calendars`, then configure your MCP client:
         "MCP_TRANSPORT": "stdio",
         "PROTON_VAULT_PATH": "/absolute/path/data/vault.enc",
         "PROTON_VAULT_KEY_FILE": "/absolute/path/secrets/vault.key",
-        "PROTON_CALENDAR_IDS": "calendar-id-from-discovery",
+        "PROTON_CALENDAR_IDS": "",
         "PROTON_TIMEZONE": "Europe/Kyiv"
       }
     }

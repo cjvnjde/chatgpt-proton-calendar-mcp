@@ -272,6 +272,30 @@ func TestInactivePrimaryCalendarKeyCannotWrite(t *testing.T) {
 	}
 }
 
+func TestAllCalendarsWhenUnrestricted(t *testing.T) {
+	f := setup(t)
+	f.service.Allowed = nil
+	ctx := context.Background()
+	calendars, err := f.service.Calendars(ctx)
+	if err != nil || len(calendars) != 1 || calendars[0].ID != "calendar1" {
+		t.Fatal("unrestricted discovery failed", calendars, err)
+	}
+	if _, err := f.service.Create(ctx, createInput()); err != nil {
+		t.Fatal("unrestricted create failed", err)
+	}
+	if _, err := f.service.Get(ctx, "calendar1", "event1"); err != nil {
+		t.Fatal("unrestricted read failed", err)
+	}
+	if err := f.service.allowed("../calendar1"); err == nil {
+		t.Fatal("unrestricted mode allowed path injection")
+	}
+	f.service.Allowed = map[string]bool{"other": true}
+	calendars, err = f.service.Calendars(ctx)
+	if err != nil || len(calendars) != 0 {
+		t.Fatal("restricted discovery leaked a calendar", calendars, err)
+	}
+}
+
 func TestChangedSignaturesBlockWritesAndAllowlist(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()

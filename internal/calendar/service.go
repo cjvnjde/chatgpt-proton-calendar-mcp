@@ -36,7 +36,10 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,512}$`)
 
 func ValidID(id string) bool { return idPattern.MatchString(id) }
 func (s *Service) allowed(id string) error {
-	if !ValidID(id) || !s.Allowed[id] {
+	if !ValidID(id) {
+		return errors.New("invalid calendar ID")
+	}
+	if len(s.Allowed) > 0 && !s.Allowed[id] {
 		return errors.New("calendar is not in the configured allowlist")
 	}
 	return nil
@@ -71,7 +74,7 @@ func (s *Service) Calendars(ctx context.Context) ([]Calendar, error) {
 	}
 	out := []Calendar{}
 	for _, c := range all {
-		if s.Allowed[c.ID] {
+		if s.allowed(c.ID) == nil {
 			out = append(out, c)
 		}
 	}

@@ -28,7 +28,7 @@ This review covers the protocol paths implemented here: SRP login, refresh, acco
 
 - Fixed Proton HTTPS endpoint, TLS validation enabled, redirects disabled, bounded response bodies, sanitized API errors. No arbitrary URL/API/shell/file-access tools.
 - Constant-time comparison of hashed HTTP bearer tokens, exact Host allowlist, cross-origin protection, bounded request bodies/headers and timeouts. Use proxy rate limits for internet-facing deployment.
-- Explicit calendar allowlist enforced for every event operation and feed call. Exact identifier validation prevents path injection.
+- Optional calendar allowlist enforced for every event operation and feed call when configured; empty/unset allows all account calendars. Exact identifier validation prevents path injection.
 - AES-256-GCM vault with authenticated format header, independent random nonces, mode-600 atomic writes, fsync, and a single-process filesystem lock. Separate encryption-key storage. No original account password persisted.
 - Password input only through a local terminal; SRP checks Proton's signed modulus through the official library and checks the server proof before accepting a session. TOTP and separate mailbox-password support; no 2FA/HV bypass.
 - Native event encryption through official gopenpgp ProtonV1 profile. Calendar passphrase and address token verification, primary write keys, existing event session-key reuse, and clearing private key parameters on operation exit.
@@ -43,6 +43,6 @@ Go vulnerability scanning reported **zero reachable vulnerabilities and zero vul
 
 Proton can change its internal API without notice. Synthetic fixture tests establish internal consistency with inspected source; they do not establish acceptance by Proton's live service. Use a dedicated calendar for the first live round trip, check it in Proton's own UI, and keep advanced invitation/occurrence writes disabled until their protocol is implemented and validated.
 
-This is a single-account service: an MCP bearer grants access to every allowlisted calendar. It does not implement multi-user OAuth or Key Transparency. The server holds decryption capability while running, and an AI host receives plaintext events returned by tools. Read-only filesystem controls do not protect against a compromised process holding the vault key.
+This is a single-account service: an MCP bearer grants access to every account calendar by default, or only the configured calendars when an allowlist is set. It does not implement multi-user OAuth or Key Transparency. The server holds decryption capability while running, and an AI host receives plaintext events returned by tools. Read-only filesystem controls do not protect against a compromised process holding the vault key.
 
 Revision checks cannot make the upstream write atomic with a preceding read. Credentials are excluded from errors, but both vault and encryption key must be protected and backed up. Login session revocation, hardware-key-only sign-in, CAPTCHA flows, recurring write transactions, invitation delivery, and automatic notification scheduling are not provided by this release.

@@ -9,7 +9,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Fill `PROTON_VAULT_KEY` and `MCP_BEARER_TOKEN` with independently generated `openssl rand -hex 32` values. Keep the vault key backed up separately. Leave `PROTON_CALENDAR_IDS` empty until discovery; the server will refuse to serve without an explicit allowlist, but operator commands still work.
+Fill `PROTON_VAULT_KEY` and `MCP_BEARER_TOKEN` with independently generated `openssl rand -hex 32` values. Keep the vault key backed up separately. Leave `PROTON_CALENDAR_IDS` empty for access to all account calendars, including calendars added later. Optionally use discovery to restrict access to selected IDs.
 
 ```sh
 docker compose build
@@ -17,7 +17,7 @@ docker compose run --rm --no-deps proton-calendar-mcp login --username you@proto
 docker compose run --rm --no-deps proton-calendar-mcp calendars
 ```
 
-The login command requires an interactive terminal. Set `PROTON_CALENDAR_IDS` to chosen IDs, comma-separated, then start:
+The login command requires an interactive terminal. Optionally set `PROTON_CALENDAR_IDS` to chosen IDs, comma-separated; leave it empty for all calendars. Then start:
 
 ```sh
 docker compose up -d
@@ -37,9 +37,9 @@ The service uses explicit `${VAR}` environment references and a named volume, ma
 
 1. Create a Docker Compose application using this repository and `docker-compose.yml`.
 2. Set Environment values from `.env.example`, with independent vault and bearer secrets. Choose `PROTON_TIMEZONE`, and add your exact public domain to `MCP_ALLOWED_HOSTS` alongside the internal/health hosts already shown. Host values omit the scheme and include a port when the incoming request includes one.
-3. Build/deploy once to create the image and volume. The server exits until login and the allowlist are configured; this is expected.
-4. In Dokploy's server terminal, go to the application's Compose working directory and run `docker compose stop proton-calendar-mcp`, then the two interactive `docker compose run` commands above, using the same Compose project/environment. This writes to the application's existing named volume. Avoid a separate Compose project that would create another volume.
-5. Put the discovered IDs into Environment and redeploy. Attach the HTTPS domain to service `proton-calendar-mcp`, **container port 8080**, path `/mcp`. Require HTTPS and rate-limit requests at the proxy. Do not route port 8081 publicly.
+3. Build/deploy once to create the image and volume. The server exits until login is complete; this is expected.
+4. In Dokploy's server terminal, go to the application's Compose working directory and run `docker compose stop proton-calendar-mcp`, then the login `docker compose run` command above (and optionally `calendars` to discover IDs), using the same Compose project/environment. This writes to the application's existing named volume. Avoid a separate Compose project that would create another volume.
+5. Leave `PROTON_CALENDAR_IDS` empty for all calendars, or put selected IDs into Environment, then redeploy. Attach the HTTPS domain to service `proton-calendar-mcp`, **container port 8080**, path `/mcp`. Require HTTPS and rate-limit requests at the proxy. Do not route port 8081 publicly.
 6. Add the HTTPS `/mcp` URL to a client that supports bearer authentication. There is no OAuth authorization server in this project.
 
 Do not put the Proton account password or TOTP seed in Dokploy Environment. They are needed only during interactive login. `PROTON_VAULT_KEY` and MCP tokens are long-lived secrets; Dokploy/Docker administrators can inspect environment credentials. Where your platform supports secret-file mounts, local binaries also accept `PROTON_VAULT_KEY_FILE`, `MCP_BEARER_TOKEN_FILE`, and `MCP_TUNNEL_TOKEN_FILE`; restrict these to mode 600 and the process owner. The shipped Compose file uses Environment secrets for compatibility with the neighboring projects.

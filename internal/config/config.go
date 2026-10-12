@@ -69,9 +69,6 @@ func Load(requireServer bool) (Config, error) {
 	if !requireServer {
 		return c, nil
 	}
-	if len(c.Allowed) == 0 {
-		return c, errors.New("PROTON_CALENDAR_IDS must explicitly allow at least one calendar")
-	}
 	if c.Transport != "stdio" && c.Transport != "http" {
 		return c, errors.New("MCP_TRANSPORT must be stdio or http")
 	}
