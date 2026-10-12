@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,36 @@ func TestMCPDiscoveryOverAuthenticatedHTTP(t *testing.T) {
 	}
 	if tools.Tools[0].InputSchema == nil {
 		t.Fatal("missing schemas")
+	}
+	foundDelete := false
+	for _, tool := range tools.Tools {
+		if tool.Name != "event_delete" {
+			continue
+		}
+		foundDelete = true
+		data, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties map[string]struct{ Type string }
+			Required   []string
+		}
+		if err := json.Unmarshal(data, &schema); err != nil {
+			t.Fatal(err)
+		}
+		if schema.Properties["occurrence"].Type != "string" {
+			t.Fatalf("event_delete missing occurrence: %s", data)
+		}
+		for _, field := range schema.Required {
+			if field == "occurrence" {
+				t.Fatal("occurrence must remain optional for non-recurring events")
+			}
+		}
+		t.Logf("advertised event_delete schema: %s", data)
+	}
+	if !foundDelete {
+		t.Fatal("event_delete is not advertised")
 	}
 }
 
