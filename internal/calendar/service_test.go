@@ -28,6 +28,7 @@ type fixture struct {
 	users, addresses, bootstrap any
 	raw                         RawEvent
 	series                      []RawEvent
+	lastMutation                map[string]json.RawMessage
 	writes                      int
 	ambiguous                   bool
 	changes                     any
@@ -143,6 +144,7 @@ func (f *fixture) respond(req *http.Request) (*http.Response, error) {
 			f.t.Fatal("invalid sync")
 		}
 		op := body.Events[0]
+		f.lastMutation = op.Event
 		if op.Event == nil {
 			f.raw = RawEvent{}
 		} else {
@@ -659,5 +661,109 @@ func TestParticipantMutationGuard(t *testing.T) {
 				t.Fatal("participant or unverified event accepted")
 			}
 		})
+	}
+}
+
+func TestSilentGuestOccurrenceDeletion(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	in := createInput()
+	in.Start, in.End = "2026-10-12T19:00:00+03:00", "2026-10-12T19:15:00+03:00"
+	in.RecurrenceRule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+	if _, err := f.service.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	ck, err := f.service.Client.UnlockCalendar(ctx, "calendar1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck.Close()
+	e, err := f.service.open(f.raw, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guests := component()
+	guests.Props.SetText("UID", e.event.UID)
+	guests.Props.SetDateTime("DTSTAMP", time.Now().UTC())
+	attendee := ical.NewProp("ATTENDEE")
+	attendee.Value = "mailto:guest@example.test"
+	attendee.Params.Set("X-PM-TOKEN", "guest-token")
+	guests.Props.Add(attendee)
+	data, err := renderCard(guests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards, _, err := proton.MakeCards(data, data, ck.Encrypt, ck.Address.Write, ck.Calendar, f.raw.SharedKeyPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.raw.AttendeesEvents = cards[1:]
+	f.raw.AttendeesInfo.Attendees = []json.RawMessage{json.RawMessage(`{"ID":"guest-id","Token":"guest-token","Status":1,"Comment":null}`)}
+	f.raw.IsProtonProtonInvite = 1
+	originalCards, _ := json.Marshal(f.raw.AttendeesEvents)
+	no, yes := false, true
+	current, err := f.service.Get(ctx, "calendar1", "event1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range []*bool{nil, &yes} {
+		if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: in.Start, SendCancellationNotice: notice}); err == nil {
+			t.Fatal("guest delete accepted without explicit no-notice choice")
+		}
+	}
+	if f.writes != 1 {
+		t.Fatal("unexpected write")
+	}
+	// A received invitation must never acquire organizer rights through this flag.
+	f.raw.IsOrganizer = 0
+	current, err = f.service.Get(ctx, "calendar1", "event1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: in.Start, SendCancellationNotice: &no}); err == nil {
+		t.Fatal("received invitation accepted")
+	}
+	f.raw.IsOrganizer = 1
+	for _, day := range []string{"12", "13", "14", "15"} {
+		current, err = f.service.Get(ctx, "calendar1", "event1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: "2026-10-" + day + "T19:00:00+03:00", SendCancellationNotice: &no}); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(f.lastMutation["AttendeesEventContent"], originalCards) {
+			t.Fatal("guest cards changed")
+		}
+		var metadata []struct {
+			Token   string
+			Status  int
+			Comment json.RawMessage
+		}
+		if err := json.Unmarshal(f.lastMutation["Attendees"], &metadata); err != nil || len(metadata) != 1 || metadata[0].Token != "guest-token" || metadata[0].Status != 1 || string(metadata[0].Comment) != "null" {
+			t.Fatal("guest response changed", metadata, err)
+		}
+		for _, field := range []string{"CancelledOccurrenceContent", "RemovedAttendeeAddresses", "AddedProtonAttendees"} {
+			if _, ok := f.lastMutation[field]; ok {
+				t.Fatal("unexpected cancellation/delivery field", field)
+			}
+		}
+	}
+	result, err := f.service.List(ctx, ListInput{CalendarID: "calendar1", Start: "2026-10-12T00:00:00+03:00", End: "2026-10-19T00:00:00+03:00"})
+	if err != nil || len(result.Events) != 1 || result.Events[0].Start != "2026-10-16T19:00:00+03:00" {
+		t.Fatal(result, err)
+	}
+	// Refuse a damaged guest signature, without sending any mutation.
+	f.raw.AttendeesEvents[0].Signature = "tampered"
+	current, err = f.service.Get(ctx, "calendar1", "event1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := f.writes
+	if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: "2026-10-16T19:00:00+03:00", SendCancellationNotice: &no}); err == nil {
+		t.Fatal("tampered guest card accepted")
+	}
+	if f.writes != writes {
+		t.Fatal("unsafe write submitted")
 	}
 }

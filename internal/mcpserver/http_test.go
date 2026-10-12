@@ -49,13 +49,16 @@ func TestMCPDiscoveryOverAuthenticatedHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 		var schema struct {
-			Properties map[string]struct{ Type string }
+			Properties map[string]struct{ Type json.RawMessage }
 			Required   []string
 		}
 		if err := json.Unmarshal(data, &schema); err != nil {
 			t.Fatal(err)
 		}
-		if schema.Properties["occurrence"].Type != "string" {
+		if !strings.Contains(string(schema.Properties["send_cancellation_notice"].Type), `"boolean"`) {
+			t.Fatalf("missing silent-cancellation choice: %s", data)
+		}
+		if string(schema.Properties["occurrence"].Type) != `"string"` {
 			t.Fatalf("event_delete missing occurrence: %s", data)
 		}
 		for _, field := range schema.Required {

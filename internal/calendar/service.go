@@ -567,6 +567,10 @@ type UpdateInput struct {
 	ReminderMinutes  *[]int  `json:"reminder_minutes,omitempty"`
 }
 
+func hasParticipants(e opened) bool {
+	return e.raw.IsProtonProtonInvite != 0 || len(e.raw.AttendeesEvents) > 0 || len(e.raw.AttendeesInfo.Attendees) > 0 || e.raw.AttendeesInfo.MoreAttendees != 0 || len(e.model.Props.Values("ATTENDEE")) > 0
+}
+
 func safeEdit(e opened) error {
 	if !e.event.Verified {
 		return errors.New("event signature could not be verified; refusing mutation")
@@ -574,7 +578,7 @@ func safeEdit(e opened) error {
 	if e.raw.IsOrganizer != 1 {
 		return errors.New("event is not owned by this account as organizer; invitation mutations are not supported")
 	}
-	if e.raw.IsProtonProtonInvite != 0 || len(e.raw.AttendeesEvents) > 0 || len(e.raw.AttendeesInfo.Attendees) > 0 || e.raw.AttendeesInfo.MoreAttendees != 0 || len(e.model.Props.Values("ATTENDEE")) > 0 {
+	if hasParticipants(e) {
 		return errors.New("event contains participants or invitation data; participant mutations are not supported")
 	}
 	// Proton emits ORGANIZER even for personal events with no attendees.
@@ -694,6 +698,16 @@ func (s *Service) writeEdited(ctx context.Context, e opened, ck *proton.Calendar
 		color = json.RawMessage("null")
 	}
 	object := map[string]any{"SharedEventContent": cards, "Notifications": notifications, "Color": color, "IsOrganizer": raw.IsOrganizer}
+	if hasParticipants(e) {
+		participantData, err := preservedParticipants(e, ck)
+		if err != nil {
+			return WriteResult{}, err
+		}
+		for key, value := range participantData {
+			object[key] = value
+		}
+	}
+
 	id, err := s.sync(ctx, raw.CalendarID, ck.Member.ID, map[string]any{"ID": raw.ID, "Event": object})
 	if err != nil {
 		return WriteResult{}, err
@@ -705,10 +719,11 @@ func (s *Service) writeEdited(ctx context.Context, e opened, ck *proton.Calendar
 }
 
 type DeleteInput struct {
-	Occurrence       string `json:"occurrence,omitempty" jsonschema:"Exact occurrence value from event_list. Required for recurring series; deletes only that occurrence. Use the series event_id and its latest revision."`
-	CalendarID       string `json:"calendar_id"`
-	EventID          string `json:"event_id"`
-	ExpectedRevision string `json:"expected_revision"`
+	SendCancellationNotice *bool  `json:"send_cancellation_notice,omitempty" jsonschema:"For meetings you organize with guests, explicitly set false to delete an occurrence without sending cancellation email. True is unsupported. Proton guests may still see calendar-sync changes; external guests may retain old copies."`
+	Occurrence             string `json:"occurrence,omitempty" jsonschema:"Exact occurrence value from event_list. Required for recurring series; deletes only that occurrence. Use the series event_id and its latest revision."`
+	CalendarID             string `json:"calendar_id"`
+	EventID                string `json:"event_id"`
+	ExpectedRevision       string `json:"expected_revision"`
 }
 
 func (s *Service) Delete(ctx context.Context, in DeleteInput) (WriteResult, error) {
@@ -736,7 +751,17 @@ func (s *Service) Delete(ctx context.Context, in DeleteInput) (WriteResult, erro
 	if in.ExpectedRevision == "" || e.event.Revision != in.ExpectedRevision {
 		return WriteResult{}, errors.New("event changed; read it again before deleting")
 	}
-	if err := safeEdit(e); err != nil {
+	if in.SendCancellationNotice != nil && *in.SendCancellationNotice {
+		return WriteResult{}, errors.New("sending cancellation notices is not supported")
+	}
+	if hasParticipants(e) && in.Occurrence != "" {
+		if !e.event.Verified || e.raw.IsOrganizer != 1 {
+			return WriteResult{}, errors.New("silent occurrence deletion requires a verified meeting you organize")
+		}
+		if in.SendCancellationNotice == nil {
+			return WriteResult{}, errors.New("meeting has guests; explicitly set send_cancellation_notice=false to delete without cancellation email")
+		}
+	} else if err := safeEdit(e); err != nil {
 		return WriteResult{}, err
 	}
 	if in.Occurrence != "" {
