@@ -44,7 +44,7 @@ The service uses explicit `${VAR}` environment references and a named volume, ma
    proton-calendar-mcp login --username you@proton.me
    ```
 
-   Enter the password and any requested TOTP/mailbox password at the hidden prompts. The server automatically loads the saved session within about a second after login exits. No stop or redeploy is needed. From a server SSH terminal, the equivalent command is `docker compose ... exec proton-calendar-mcp proton-calendar-mcp login --username you@proton.me`, using the same project, environment, and Compose files as Dokploy.
+   Enter the password and any requested TOTP/mailbox password at the hidden prompts. If a human-verification link appears, open it in your browser, complete the CAPTCHA, then return to the terminal and press Enter. Complete login within five minutes; otherwise start a new login. The server automatically loads the saved session within about a second after login exits. No stop or redeploy is needed. From a server SSH terminal, the equivalent command is `docker compose ... exec proton-calendar-mcp proton-calendar-mcp login --username you@proton.me`, using the same project, environment, and Compose files as Dokploy.
 5. Leave `PROTON_CALENDAR_IDS` empty for all calendars, or put selected IDs into Environment, then redeploy. Attach the HTTPS domain to service `proton-calendar-mcp`, **container port 8080**, path `/mcp`. Require HTTPS and rate-limit requests at the proxy. Do not route port 8081 publicly.
 6. Add the HTTPS `/mcp` URL to a client that supports bearer authentication. There is no OAuth authorization server in this project.
 
@@ -83,7 +83,7 @@ Back up the vault and its encryption key separately. Possession of both allows i
 | HTTP 401 | Check the MCP bearer token for that listener; it is separate from Proton credentials. |
 | HTTP 421 | Add the exact incoming Host, including its port, to `MCP_ALLOWED_HOSTS`. |
 | Proton 401 from a tool | Session refresh failed or was revoked; stop and log in again. |
-| Human verification required | Complete verification using Proton's supported UI; no CAPTCHA bypass exists. |
+| Human verification required | During interactive login, follow the printed Proton verification link, solve the CAPTCHA, and press Enter. If CAPTCHA is not offered, the CLI cannot complete that method. |
 | Signature failure on mutation | Use Proton's UI; do not disable verification to force the edit. |
 | Previous create outcome unknown | Reconcile the signed UID in the error against current events before another create. |
 

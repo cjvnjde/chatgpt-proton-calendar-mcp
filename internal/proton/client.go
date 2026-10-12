@@ -11,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +26,7 @@ type APIError struct{ Status, Code int }
 
 func (e *APIError) Error() string {
 	if e.Code == 9001 {
-		return "Proton requires human verification; complete account verification outside MCP"
+		return "Proton requires human verification; run interactive login to complete the challenge"
 	}
 	if e.Status == 401 {
 		return "Proton session expired; run the local login command"
@@ -36,13 +38,14 @@ func (e *APIError) Error() string {
 }
 
 type Client struct {
-	mu           sync.Mutex
-	http         *http.Client
-	base         string
-	state        vault.State
-	save         func(vault.State) error
-	broken       bool
-	initializing bool
+	mu                sync.Mutex
+	http              *http.Client
+	base              string
+	state             vault.State
+	save              func(vault.State) error
+	broken            bool
+	initializing      bool
+	humanVerification func(string) error
 }
 
 func New(state vault.State, save func(vault.State) error) *Client {
@@ -73,6 +76,45 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 }
 
 func (c *Client) call(ctx context.Context, method, path string, query url.Values, body, out any, bearer bool) error {
+	err := c.callOnce(ctx, method, path, query, body, out, bearer, "")
+	var challenge *humanChallenge
+	if !errors.As(err, &challenge) || c.humanVerification == nil {
+		return err
+	}
+	if !slices.Contains(challenge.methods, "captcha") {
+		return errors.New("Proton requires a human verification method this CLI does not support; CAPTCHA was not offered")
+	}
+	if challenge.token == "" || len(challenge.token) > 4096 || strings.ContainsAny(challenge.token, "\r\n") {
+		return errors.New("invalid Proton verification challenge")
+	}
+	page := "https://verify.proton.me/?" + url.Values{"methods": {"captcha"}, "token": {challenge.token}}.Encode()
+	if err := c.humanVerification(page); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Retry only the explicitly rejected request, once, with the user-completed proof.
+	return c.callOnce(ctx, method, path, query, body, out, bearer, challenge.token)
+}
+
+type humanChallenge struct {
+	*APIError
+	token   string
+	methods []string
+}
+
+func (e *humanChallenge) Unwrap() error { return e.APIError }
+
+// SetHumanVerification is only used by the interactive operator login command.
+// The callback must not call back into this client, whose lock remains held.
+func (c *Client) SetHumanVerification(resolve func(string) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.humanVerification = resolve
+}
+
+func (c *Client) callOnce(ctx context.Context, method, path string, query url.Values, body, out any, bearer bool, verification string) error {
 	var data []byte
 	if body != nil {
 		var err error
@@ -102,6 +144,10 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 	if bearer && c.state.Session.AccessToken != "" {
 		r.Header.Set("Authorization", "Bearer "+c.state.Session.AccessToken)
 	}
+	if verification != "" {
+		r.Header.Set("x-pm-human-verification-token", verification)
+		r.Header.Set("x-pm-human-verification-token-type", "captcha")
+	}
 	resp, err := c.http.Do(r)
 	if err != nil {
 		return errors.New("Proton request failed; a write may have succeeded—inspect current state before retrying")
@@ -111,12 +157,22 @@ func (c *Client) call(ctx context.Context, method, path string, query url.Values
 	if err != nil || len(b) > 8<<20 {
 		return errors.New("invalid or oversized Proton response; write outcome may be unknown")
 	}
-	var envelope struct{ Code int }
+	var envelope struct {
+		Code    int
+		Details struct {
+			HumanVerificationToken   string
+			HumanVerificationMethods []string
+		}
+	}
 	if err := json.Unmarshal(b, &envelope); err != nil {
 		return errors.New("invalid Proton response; write outcome may be unknown")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (envelope.Code != 1000 && envelope.Code != 1001) {
-		return &APIError{resp.StatusCode, envelope.Code}
+		api := &APIError{resp.StatusCode, envelope.Code}
+		if envelope.Code == 9001 {
+			return &humanChallenge{api, envelope.Details.HumanVerificationToken, envelope.Details.HumanVerificationMethods}
+		}
+		return api
 	}
 	if out != nil && json.Unmarshal(b, out) != nil {
 		return errors.New("unexpected Proton response schema; write outcome may be unknown")

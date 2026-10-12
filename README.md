@@ -29,7 +29,7 @@ make build
 ./bin/proton-calendar-mcp calendars
 ```
 
-Login prompts for the account password and, if needed, a TOTP code and separate mailbox password. It verifies the SRP server proof, unlocks the account/address keys, and saves only session tokens and the **derived key passphrase** in the encrypted vault. No AI tool accepts passwords or tokens. Hardware-key-only authentication and CAPTCHA solving are not implemented; neither is bypassed.
+Login prompts for the account password and, if needed, a TOTP code and separate mailbox password. It verifies the SRP server proof, unlocks the account/address keys, and saves only session tokens and the **derived key passphrase** in the encrypted vault. No AI tool accepts passwords or tokens. When Proton requests CAPTCHA verification, the terminal prints a `https://verify.proton.me/` link. Open it in your browser, solve the challenge yourself, then press Enter in the terminal to continue. TOTP is requested separately. Hardware-key-only authentication and non-CAPTCHA human verification methods are not implemented.
 
 Legacy unsalted account keys are refused because supporting them would require persisting the original mailbox/account password instead of a derived passphrase.
 

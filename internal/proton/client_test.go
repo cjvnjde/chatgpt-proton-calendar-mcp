@@ -106,3 +106,60 @@ func TestUnsaltedPasswordIsNeverPersisted(t *testing.T) {
 		t.Fatal("original password persisted")
 	}
 }
+
+func TestHumanVerificationHandoff(t *testing.T) {
+	for _, mode := range []string{"success", "rejected", "noninteractive", "unsupported"} {
+		t.Run(mode, func(t *testing.T) {
+			calls, prompts := 0, 0
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls == 2 {
+					if r.Header.Get("x-pm-human-verification-token") != "challenge-secret" || r.Header.Get("x-pm-human-verification-token-type") != "captcha" {
+						t.Error("missing proof headers")
+					}
+					if mode == "success" {
+						w.Write([]byte(`{"Code":1000}`))
+						return
+					}
+				} else if r.Header.Get("x-pm-human-verification-token") != "" {
+					t.Error("proof reused")
+				}
+				method := "captcha"
+				if mode == "unsupported" {
+					method = "sms"
+				}
+				w.WriteHeader(422)
+				json.NewEncoder(w).Encode(map[string]any{"Code": 9001, "Details": map[string]any{"HumanVerificationToken": "challenge-secret", "HumanVerificationMethods": []string{method}, "WebUrl": "https://evil.example/"}})
+			}))
+			defer ts.Close()
+			c := New(vault.State{}, nil)
+			c.base = ts.URL
+			if mode != "noninteractive" {
+				c.SetHumanVerification(func(page string) error {
+					prompts++
+					if page != "https://verify.proton.me/?methods=captcha&token=challenge-secret" {
+						t.Error("unsafe verification URL", page)
+					}
+					return nil
+				})
+			}
+			err := c.Do(context.Background(), "POST", "/core/v4/auth", nil, map[string]string{"test": "proof"}, nil)
+			if mode == "success" && err != nil {
+				t.Fatal(err)
+			}
+			if mode != "success" && err == nil {
+				t.Fatal("challenge unexpectedly accepted")
+			}
+			if err != nil && strings.Contains(err.Error(), "challenge-secret") {
+				t.Fatal("challenge leaked")
+			}
+			expected := 2
+			if mode == "noninteractive" || mode == "unsupported" {
+				expected = 1
+			}
+			if calls != expected || prompts != expected-1 {
+				t.Fatal("unexpected retry/prompt count", calls, prompts)
+			}
+		})
+	}
+}

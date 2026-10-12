@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -120,6 +121,16 @@ func run(args []string) error {
 			return err
 		}
 		defer clear(password)
+		client.SetHumanVerification(func(page string) error {
+			fmt.Fprintln(os.Stderr, "Open this Proton page in your browser and complete the human verification:")
+			fmt.Fprintln(os.Stderr, page)
+			fmt.Fprintln(os.Stderr, "Return here and press Enter after the page confirms verification.")
+			_, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err != nil {
+				return errors.New("human verification cancelled")
+			}
+			return nil
+		})
 		loginCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		err = client.Login(loginCtx, *username, password, func() (string, error) {
