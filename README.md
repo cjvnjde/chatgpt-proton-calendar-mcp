@@ -53,7 +53,7 @@ Configure your MCP client below. Leave `PROTON_CALENDAR_IDS` empty for all calen
 }
 ```
 
-One process owns the vault. Stop the MCP server before rerunning `login` or `calendars`. Do not run multiple client-launched stdio processes against one vault; use HTTP to share one server process.
+HTTP deployments start healthy before first login. Run `proton-calendar-mcp login --username you@proton.me` in the running container terminal; the server automatically activates the saved session. Once active, one process owns the vault: stop the MCP server before rerunning `login` or `calendars`. Do not run multiple client-launched stdio processes against one vault; use HTTP to share one server process.
 
 ## Deployment
 

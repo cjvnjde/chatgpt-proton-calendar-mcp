@@ -15,7 +15,12 @@ import (
 // Both public and tunnel listeners authenticate. The tunnel uses a distinct
 // key and is bound to loopback unless explicitly configured otherwise.
 func Handler(server *mcp.Server, token string, hosts []string) http.Handler {
-	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	return DynamicHandler(func() *mcp.Server { return server }, token, hosts)
+}
+
+// DynamicHandler keeps liveness available while a local operator completes login.
+func DynamicHandler(current func() *mcp.Server, token string, hosts []string) http.Handler {
+	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return current() }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	protected := http.NewCrossOriginProtection().Handler(stream)
 	expected := sha256.Sum256([]byte(token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +64,11 @@ func Handler(server *mcp.Server, token string, hosts []string) http.Handler {
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(b))
+		}
+		if current() == nil {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "Proton login required; run login in the container terminal", http.StatusServiceUnavailable)
+			return
 		}
 		protected.ServeHTTP(w, r)
 	})

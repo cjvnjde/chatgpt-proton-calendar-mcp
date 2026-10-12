@@ -18,6 +18,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var ErrLocked = errors.New("vault is already in use; stop the server before login")
+
 type Session struct {
 	UID          string
 	AccessToken  string
@@ -89,7 +91,7 @@ func Open(path, keyFile string) (*Store, error) {
 	}
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		lock.Close()
-		return nil, errors.New("vault is already in use; stop the server before login")
+		return nil, ErrLocked
 	}
 	return &Store{path: path, aead: aead, lock: lock}, nil
 }

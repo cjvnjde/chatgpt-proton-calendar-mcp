@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"proton-calendar-mcp/internal/config"
 	"proton-calendar-mcp/internal/mcpserver"
 	"proton-calendar-mcp/internal/proton"
+	"proton-calendar-mcp/internal/vault"
 )
 
 func main() {
@@ -89,6 +91,9 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if command == "serve" && cfg.Transport == "http" {
+		return serveHTTP(cfg)
+	}
 	v, err := cfg.OpenVault()
 	if err != nil {
 		return err
@@ -142,7 +147,7 @@ func run(args []string) error {
 		if err := client.DeriveKeyPassword(loginCtx, mailbox); err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stderr, "Session saved in the encrypted vault. Run calendars to choose allowed calendar IDs.")
+		fmt.Fprintln(os.Stderr, "Session saved in the encrypted vault. A waiting HTTP server will activate automatically.")
 		return nil
 	}
 	if state.Session.AccessToken == "" || state.Session.KeyPassword == "" {
@@ -163,6 +168,50 @@ func run(args []string) error {
 	if cfg.Transport == "stdio" {
 		return server.Run(ctx, &mcp.StdioTransport{})
 	}
+	return nil
+}
+
+func serveHTTP(cfg config.Config) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var active atomic.Pointer[mcp.Server]
+	var owned *vault.Store
+	defer func() {
+		if owned != nil {
+			owned.Close()
+		}
+	}()
+	activate := func() error {
+		v, err := cfg.OpenVault()
+		if errors.Is(err, vault.ErrLocked) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		state, err := v.Load()
+		if err != nil {
+			v.Close()
+			return err
+		}
+		if state.Session.AccessToken == "" || state.Session.KeyPassword == "" {
+			v.Close()
+			return nil
+		}
+		client := proton.New(state, v.Save)
+		service := &calendar.Service{Client: client, Allowed: cfg.Allowed, Location: cfg.Location}
+		logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		owned = v
+		active.Store(mcpserver.New(service, logger))
+		fmt.Fprintln(os.Stderr, "Proton session loaded; MCP ready.")
+		return nil
+	}
+	if err := activate(); err != nil {
+		return err
+	}
+	if active.Load() == nil {
+		fmt.Fprintln(os.Stderr, "Waiting for Proton login. In the container terminal run: proton-calendar-mcp login --username YOUR_EMAIL")
+	}
 	listeners := []struct{ addr, token string }{{cfg.HTTPAddr, cfg.Token}}
 	if cfg.TunnelAddr != "" {
 		listeners = append(listeners, struct{ addr, token string }{cfg.TunnelAddr, cfg.TunnelToken})
@@ -180,17 +229,32 @@ func run(args []string) error {
 			return errors.New("cannot bind MCP listener")
 		}
 		sockets = append(sockets, socket)
-		servers = append(servers, &http.Server{Handler: mcpserver.Handler(server, l.token, cfg.Hosts), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 3 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10})
+		servers = append(servers, &http.Server{Handler: mcpserver.DynamicHandler(active.Load, l.token, cfg.Hosts), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 3 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10})
 	}
 	errCh := make(chan error, len(servers))
 	for i, srv := range servers {
 		go func() { errCh <- srv.Serve(sockets[i]) }()
 	}
-	select {
-	case <-ctx.Done():
-	case err := <-errCh:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return errors.New("MCP HTTP listener stopped unexpectedly")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var serveErr error
+	running := true
+	for running {
+		select {
+		case <-ctx.Done():
+			running = false
+		case err := <-errCh:
+			if !errors.Is(err, http.ErrServerClosed) {
+				serveErr = errors.New("MCP HTTP listener stopped unexpectedly")
+			}
+			running = false
+		case <-ticker.C:
+			if active.Load() == nil {
+				if err := activate(); err != nil {
+					serveErr = err
+					running = false
+				}
+			}
 		}
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -200,7 +264,7 @@ func run(args []string) error {
 			srv.Close()
 		}
 	}
-	return nil
+	return serveErr
 }
 
 func prompt(label string) ([]byte, error) {

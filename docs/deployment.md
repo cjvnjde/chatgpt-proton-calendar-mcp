@@ -37,14 +37,20 @@ The service uses explicit `${VAR}` environment references and a named volume, ma
 
 1. Create a Docker Compose application using this repository and `docker-compose.yml`.
 2. Set Environment values from `.env.example`, with independent vault and bearer secrets. Choose `PROTON_TIMEZONE`, and add your exact public domain to `MCP_ALLOWED_HOSTS` alongside the internal/health hosts already shown. Host values omit the scheme and include a port when the incoming request includes one.
-3. Build/deploy once to create the image and volume. The server exits until login is complete; this is expected.
-4. In Dokploy's server terminal, go to the application's Compose working directory and run `docker compose stop proton-calendar-mcp`, then the login `docker compose run` command above (and optionally `calendars` to discover IDs), using the same Compose project/environment. This writes to the application's existing named volume. Avoid a separate Compose project that would create another volume.
+3. Deploy normally. The HTTP container stays running and healthy before Proton login. Authenticated MCP requests return HTTP 503 until a session is available; the tunnel may retry while setup is pending.
+4. Open the **proton-calendar-mcp container terminal** in Dokploy, select `/bin/sh`, and run:
+
+   ```sh
+   proton-calendar-mcp login --username you@proton.me
+   ```
+
+   Enter the password and any requested TOTP/mailbox password at the hidden prompts. The server automatically loads the saved session within about a second after login exits. No stop or redeploy is needed. From a server SSH terminal, the equivalent command is `docker compose ... exec proton-calendar-mcp proton-calendar-mcp login --username you@proton.me`, using the same project, environment, and Compose files as Dokploy.
 5. Leave `PROTON_CALENDAR_IDS` empty for all calendars, or put selected IDs into Environment, then redeploy. Attach the HTTPS domain to service `proton-calendar-mcp`, **container port 8080**, path `/mcp`. Require HTTPS and rate-limit requests at the proxy. Do not route port 8081 publicly.
 6. Add the HTTPS `/mcp` URL to a client that supports bearer authentication. There is no OAuth authorization server in this project.
 
 Do not put the Proton account password or TOTP seed in Dokploy Environment. They are needed only during interactive login. `PROTON_VAULT_KEY` and MCP tokens are long-lived secrets; Dokploy/Docker administrators can inspect environment credentials. Where your platform supports secret-file mounts, local binaries also accept `PROTON_VAULT_KEY_FILE`, `MCP_BEARER_TOKEN_FILE`, and `MCP_TUNNEL_TOKEN_FILE`; restrict these to mode 600 and the process owner. The shipped Compose file uses Environment secrets for compatibility with the neighboring projects.
 
-To log in again, stop the service first so its vault lock is released. Run login with the same key, named volume, and Compose project, then restart. Refresh tokens are persisted immediately after successful rotation. Run one instance; replicas or separate copies of the same session can invalidate each other's refresh tokens.
+After a session has been activated, stop the service before replacing it so its vault lock is released. Run login with the same key, named volume, and Compose project, then restart. Refresh tokens are persisted immediately after successful rotation. Run one instance; replicas or separate copies of the same session can invalidate each other's refresh tokens.
 
 ## Optional OpenAI Secure MCP Tunnel
 
@@ -73,7 +79,7 @@ Back up the vault and its encryption key separately. Possession of both allows i
 | Symptom | Action |
 |---|---|
 | `vault is already in use` | Stop the server before running operator commands. |
-| No unlocked session | Complete local interactive login. |
+| HTTP 503: Proton login required | Run `proton-calendar-mcp login --username you@proton.me` in the running container terminal. |
 | HTTP 401 | Check the MCP bearer token for that listener; it is separate from Proton credentials. |
 | HTTP 421 | Add the exact incoming Host, including its port, to `MCP_ALLOWED_HOSTS`. |
 | Proton 401 from a tool | Session refresh failed or was revoked; stop and log in again. |
@@ -81,4 +87,4 @@ Back up the vault and its encryption key separately. Possession of both allows i
 | Signature failure on mutation | Use Proton's UI; do not disable verification to force the edit. |
 | Previous create outcome unknown | Reconcile the signed UID in the error against current events before another create. |
 
-`/healthz` checks process liveness, not account validity or upstream connectivity. It deliberately returns no credentials or calendar details.
+`/healthz` checks process liveness, not login readiness, account validity, or upstream connectivity. It remains healthy while waiting for first login. It deliberately returns no credentials or calendar details.
