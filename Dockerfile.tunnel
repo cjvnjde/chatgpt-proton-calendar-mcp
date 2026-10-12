@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+FROM golang:1.27.1-trixie@sha256:9baa6b4187bbb98d240372a8a235ac0bb6b5ddd52bba1431dc2f7c0705862728 AS builder
+WORKDIR /src
+# OpenAI tunnel-client v0.0.14, pinned to its peeled commit.
+RUN git init . \
+    && git remote add origin https://github.com/openai/tunnel-client.git \
+    && git fetch --depth 1 origin 0f870e50a973fa820d4c409000059e181e8d242b \
+    && git checkout --detach FETCH_HEAD
+RUN CGO_ENABLED=0 go build -trimpath -o /out/tunnel-client ./cmd/client
+
+FROM debian:stable-slim@sha256:04634311a8d5fc442b6eb06d792293c4f3e2268652ca7634e00ce8ef5cc0a28a
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /out/tunnel-client /usr/local/bin/tunnel-client
+COPY --from=builder /src/LICENSE /src/NOTICE /usr/share/licenses/tunnel-client/
+ENV HOME=/tmp/tunnel-client
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/tunnel-client", "run"]

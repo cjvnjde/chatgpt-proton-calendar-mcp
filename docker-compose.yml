@@ -1,0 +1,37 @@
+services:
+  proton-calendar-mcp:
+    image: proton-calendar-mcp:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_ADDR: 0.0.0.0:8080
+      MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN:?set MCP_BEARER_TOKEN}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost:8080,127.0.0.1:8080,proton-calendar-mcp:8080,proton-calendar-mcp:8081}
+      PROTON_VAULT_PATH: /app/data/vault.enc
+      PROTON_VAULT_KEY: ${PROTON_VAULT_KEY:?set PROTON_VAULT_KEY}
+      PROTON_CALENDAR_IDS: ${PROTON_CALENDAR_IDS:-}
+      PROTON_TIMEZONE: ${PROTON_TIMEZONE:-UTC}
+    expose:
+      - "8080"
+    volumes:
+      - proton-calendar-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "proton-calendar-mcp", "health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  proton-calendar-data:

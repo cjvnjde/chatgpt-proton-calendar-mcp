@@ -1,0 +1,36 @@
+# Optional OpenAI tunnel; base Compose has no OpenAI dependency or credentials.
+services:
+  proton-calendar-mcp:
+    environment:
+      MCP_TUNNEL_ADDR: 0.0.0.0:8081
+      MCP_TUNNEL_TOKEN: ${MCP_TUNNEL_TOKEN:?set a distinct MCP_TUNNEL_TOKEN}
+    expose:
+      - "8081"
+
+  openai-tunnel:
+    image: proton-calendar-tunnel:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.tunnel
+    restart: unless-stopped
+    depends_on:
+      proton-calendar-mcp:
+        condition: service_healthy
+    environment:
+      CONTROL_PLANE_API_KEY: ${CONTROL_PLANE_API_KEY:?set CONTROL_PLANE_API_KEY}
+      CONTROL_PLANE_TUNNEL_ID: ${CONTROL_PLANE_TUNNEL_ID:?set CONTROL_PLANE_TUNNEL_ID}
+      MCP_SERVER_URL: http://proton-calendar-mcp:8081/mcp
+      MCP_TUNNEL_AUTHORIZATION: Bearer ${MCP_TUNNEL_TOKEN:?set MCP_TUNNEL_TOKEN}
+      MCP_EXTRA_HEADERS: "Authorization: env:MCP_TUNNEL_AUTHORIZATION"
+      MCP_DISCOVERY_EXTRA_HEADERS: "Authorization: env:MCP_TUNNEL_AUTHORIZATION"
+      MCP_STARTUP_WAIT_TIMEOUT: 30s
+      LOG_LEVEL: warn
+      LOG_FORMAT: json
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m

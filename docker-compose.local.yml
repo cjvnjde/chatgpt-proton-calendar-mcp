@@ -1,0 +1,5 @@
+# Publish direct HTTP on this host's loopback interface only.
+services:
+  proton-calendar-mcp:
+    ports:
+      - "127.0.0.1:8080:8080"
