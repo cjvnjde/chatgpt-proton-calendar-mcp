@@ -32,9 +32,11 @@ type Service struct {
 	mu       sync.Mutex
 }
 
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,512}$`)
+// Proton IDs are URL-safe base64 and may retain trailing padding.
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+={0,2}$`)
+var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
-func ValidID(id string) bool { return idPattern.MatchString(id) }
+func ValidID(id string) bool { return len(id) <= 512 && idPattern.MatchString(id) }
 func (s *Service) allowed(id string) error {
 	if !ValidID(id) {
 		return errors.New("invalid calendar ID")
@@ -58,6 +60,9 @@ func Discover(ctx context.Context, c *proton.Client) ([]Calendar, error) {
 	}
 	out := []Calendar{}
 	for _, cal := range r.Calendars {
+		if !ValidID(cal.ID) {
+			return nil, errors.New("Proton returned an invalid calendar ID")
+		}
 		if len(cal.Members) == 0 {
 			continue
 		}
@@ -443,7 +448,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (WriteResult, erro
 	if err := s.allowed(in.CalendarID); err != nil {
 		return WriteResult{}, err
 	}
-	if !ValidID(in.RequestID) || len(in.RequestID) > 128 {
+	if !requestIDPattern.MatchString(in.RequestID) {
 		return WriteResult{}, errors.New("request_id must be a unique 1-128 character identifier")
 	}
 	if strings.TrimSpace(in.Title) == "" {

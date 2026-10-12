@@ -12,9 +12,9 @@ func TestSecureConfigDefaultsAndTunnelIsolation(t *testing.T) {
 	if c, err := Load(true); err != nil || len(c.Allowed) != 0 {
 		t.Fatal("empty calendar IDs should allow all calendars", c, err)
 	}
-	t.Setenv("PROTON_CALENDAR_IDS", "calendar1")
+	t.Setenv("PROTON_CALENDAR_IDS", "calendar1==")
 	c, err := Load(true)
-	if err != nil || c.Transport != "stdio" {
+	if err != nil || c.Transport != "stdio" || !c.Allowed["calendar1=="] {
 		t.Fatal(c, err)
 	}
 	t.Setenv("MCP_TRANSPORT", "http")

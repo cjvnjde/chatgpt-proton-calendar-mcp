@@ -360,3 +360,74 @@ func TestListingAndChangeFeed(t *testing.T) {
 		t.Fatal(changes, err)
 	}
 }
+
+func TestPaddedProtonIDs(t *testing.T) {
+	f := setup(t)
+	f.service.Allowed = nil
+	calendarID := strings.Repeat("a", 86) + "=="
+	eventID := strings.Repeat("b", 86) + "=="
+	cursorID := strings.Repeat("c", 86) + "=="
+	encode := strings.NewReplacer("calendar1", calendarID, "event1", eventID, "cursor1", cursorID)
+	decode := strings.NewReplacer(calendarID, "calendar1", eventID, "event1", cursorID, "cursor1")
+	http.DefaultTransport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		copy := r.Clone(r.Context())
+		copy.URL.Path = decode.Replace(copy.URL.Path)
+		copy.URL.RawPath = ""
+		resp, err := f.respond(copy)
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		body := encode.Replace(string(data))
+		resp.Body = io.NopCloser(strings.NewReader(body))
+		resp.ContentLength = int64(len(body))
+		return resp, nil
+	})
+	ctx := context.Background()
+	calendars, err := f.service.Calendars(ctx)
+	if err != nil || len(calendars) != 1 || calendars[0].ID != calendarID {
+		t.Fatal("padded calendar disappeared", calendars, err)
+	}
+	in := createInput()
+	in.CalendarID = calendarID
+	if _, err := f.service.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	event, err := f.service.Get(ctx, calendarID, eventID)
+	if err != nil || event.ID != eventID {
+		t.Fatal("padded event failed", event, err)
+	}
+	baseline, err := f.service.Changes(ctx, ChangesInput{CalendarID: calendarID})
+	if err != nil || baseline.Cursor != cursorID {
+		t.Fatal(baseline, err)
+	}
+	f.changes = map[string]any{"CalendarModelEventID": "cursor2", "CalendarEvents": []any{}}
+	if _, err := f.service.Changes(ctx, ChangesInput{CalendarID: calendarID, Cursor: cursorID}); err != nil {
+		t.Fatal(err)
+	}
+	f.service.Allowed = map[string]bool{calendarID: true}
+	if calendars, err := f.service.Calendars(ctx); err != nil || len(calendars) != 1 {
+		t.Fatal("padded allowlist failed", calendars, err)
+	}
+	f.service.Allowed = map[string]bool{"other": true}
+	if calendars, err := f.service.Calendars(ctx); err != nil || len(calendars) != 0 {
+		t.Fatal("allowlist leaked", calendars, err)
+	}
+}
+
+func TestIDValidation(t *testing.T) {
+	for _, id := range []string{"calendar1", "abc=", "abc==", "ab-_=="} {
+		if !ValidID(id) {
+			t.Errorf("valid ID rejected: %q", id)
+		}
+	}
+	for _, id := range []string{"", "=", "abc===", "a=b", "../abc", "a/b", "a?b", "a#b", "a%2fb", "a\nb", strings.Repeat("a", 513)} {
+		if ValidID(id) {
+			t.Errorf("unsafe ID accepted: %q", id)
+		}
+	}
+}
