@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ type fixture struct {
 	service                     *Service
 	users, addresses, bootstrap any
 	raw                         RawEvent
+	series                      []RawEvent
 	writes                      int
 	ambiguous                   bool
 	changes                     any
@@ -164,10 +166,13 @@ func (f *fixture) respond(req *http.Request) (*http.Response, error) {
 		value = map[string]any{"Responses": []any{map[string]any{"Index": 0, "Response": map[string]any{"Code": 1000, "Event": map[string]string{"ID": "event1"}}}}}
 	case "/calendar/v1/calendar1/events/event1":
 		value = map[string]any{"Event": f.raw}
-	case "/calendar/v1/calendar1/events":
+	case "/calendar/v1/events", "/calendar/v1/calendar1/events":
 		events := []RawEvent{}
 		if f.raw.ID != "" {
 			events = append(events, f.raw)
+		}
+		if path == "/calendar/v1/events" && f.series != nil {
+			events = f.series
 		}
 		value = map[string]any{"Events": events, "More": 0}
 	case "/calendar/v1/calendar1/modelevents/latest":
@@ -235,10 +240,10 @@ func TestNativeCreateReadEditDeleteAndReplay(t *testing.T) {
 	if e.Title != title || e.Description != in.Description || e.Start != in.Start || !e.Verified {
 		t.Fatal("edit lost fields", e)
 	}
-	if _, err := f.service.Delete(ctx, DeleteInput{"calendar1", "event1", stale}); err == nil {
+	if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: stale}); err == nil {
 		t.Fatal("stale delete accepted")
 	}
-	if _, err := f.service.Delete(ctx, DeleteInput{"calendar1", "event1", e.Revision}); err != nil {
+	if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: e.Revision}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -429,5 +434,147 @@ func TestIDValidation(t *testing.T) {
 		if ValidID(id) {
 			t.Errorf("unsafe ID accepted: %q", id)
 		}
+	}
+}
+
+func TestDeleteWeekdayOccurrencesPreservesFriday(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	in := createInput()
+	in.Title = "Daily"
+	in.Start, in.End = "2026-10-12T19:00:00+03:00", "2026-10-12T19:15:00+03:00"
+	in.RecurrenceRule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+	if _, err := f.service.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	original, err := f.service.Get(ctx, "calendar1", "event1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: original.Revision}); err == nil {
+		t.Fatal("series deleted without occurrence")
+	}
+	for _, day := range []string{"12", "13", "14", "15"} {
+		current, err := f.service.Get(ctx, "calendar1", "event1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: "2026-10-" + day + "T19:00:00+03:00"})
+		if err != nil {
+			t.Fatal(day, err)
+		}
+	}
+	result, err := f.service.List(ctx, ListInput{CalendarID: "calendar1", Start: "2026-10-12T00:00:00+03:00", End: "2026-10-19T00:00:00+03:00"})
+	if err != nil || len(result.Events) != 1 || result.Events[0].Start != "2026-10-16T19:00:00+03:00" {
+		t.Fatal(result, err)
+	}
+	next, err := f.service.List(ctx, ListInput{CalendarID: "calendar1", Start: "2026-10-19T00:00:00+03:00", End: "2026-10-26T00:00:00+02:00"})
+	if err != nil || len(next.Events) != 5 {
+		t.Fatal("future week changed", next, err)
+	}
+	current, err := f.service.Get(ctx, "calendar1", "event1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.RecurrenceRule != original.RecurrenceRule || current.Title != original.Title || current.Description != original.Description || !current.Verified {
+		t.Fatal("series metadata or signatures lost", current)
+	}
+	before := f.writes
+	for _, bad := range []DeleteInput{
+		{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: original.Revision, Occurrence: "2026-10-16T19:00:00+03:00"},
+		{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: "2026-10-17T19:00:00+03:00"},
+		{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: "2026-10-16T19:05:00+03:00"},
+		{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: current.Revision, Occurrence: "2026-10-12T19:00:00+03:00"},
+	} {
+		if _, err := f.service.Delete(ctx, bad); err == nil {
+			t.Fatal("invalid occurrence/revision accepted")
+		}
+	}
+	if f.writes != before {
+		t.Fatal("unsafe mutation")
+	}
+}
+
+func TestDeleteOccurrenceAcrossDSTAndAllDay(t *testing.T) {
+	for _, allDay := range []bool{false, true} {
+		t.Run(strconv.FormatBool(allDay), func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			in := createInput()
+			in.Start, in.End = "2026-10-24T19:00:00+03:00", "2026-10-24T19:15:00+03:00"
+			in.AllDay = allDay
+			if allDay {
+				in.Start, in.End = "2026-10-24", "2026-10-25"
+			}
+			in.RecurrenceRule = "FREQ=DAILY;COUNT=3"
+			if _, err := f.service.Create(ctx, in); err != nil {
+				t.Fatal(err)
+			}
+			query := ListInput{CalendarID: "calendar1", Start: "2026-10-24T00:00:00+03:00", End: "2026-10-27T00:00:00+02:00"}
+			before, err := f.service.List(ctx, query)
+			if err != nil || len(before.Events) != 3 {
+				t.Fatal(before, err)
+			}
+			e, err := f.service.Get(ctx, "calendar1", "event1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: e.Revision, Occurrence: before.Events[1].Occurrence}); err != nil {
+				t.Fatal(err)
+			}
+			after, err := f.service.List(ctx, query)
+			if err != nil || len(after.Events) != 2 || after.Events[0].Start != before.Events[0].Start || after.Events[1].Start != before.Events[2].Start {
+				t.Fatal(after, err)
+			}
+		})
+	}
+}
+
+func TestDeleteEditedOccurrenceRefused(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	in := createInput()
+	in.RecurrenceRule = "FREQ=DAILY;COUNT=3"
+	if _, err := f.service.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	ck, err := f.service.Client.UnlockCalendar(ctx, "calendar1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck.Close()
+	e, err := f.service.open(f.raw, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.shared[0].Props.Del("RRULE")
+	at, err := time.Parse(time.RFC3339, in.Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.shared[0].Props.SetDateTime("RECURRENCE-ID", at.UTC())
+	a, err := renderCard(e.shared[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := renderCard(e.shared[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards, _, err := proton.MakeCards(a, b, ck.Encrypt, ck.Address.Write, ck.Calendar, f.raw.SharedKeyPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := f.raw
+	override.ID = "override1"
+	override.SharedEvents = cards
+	f.series = []RawEvent{f.raw, override}
+	before := f.writes
+	_, err = f.service.Delete(ctx, DeleteInput{CalendarID: "calendar1", EventID: "event1", ExpectedRevision: e.event.Revision, Occurrence: in.Start})
+	if err == nil || !strings.Contains(err.Error(), "edited separately") {
+		t.Fatal(err)
+	}
+	if f.writes != before {
+		t.Fatal("override deletion submitted a partial write")
 	}
 }

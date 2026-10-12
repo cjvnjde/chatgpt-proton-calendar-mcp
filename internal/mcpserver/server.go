@@ -9,7 +9,7 @@ import (
 	"proton-calendar-mcp/internal/calendar"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 func New(service *calendar.Service, logger *slog.Logger) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "proton-calendar-mcp", Title: "Proton Calendar", Version: Version}, &mcp.ServerOptions{
@@ -53,7 +53,7 @@ func New(service *calendar.Service, logger *slog.Logger) *mcp.Server {
 		r, err := service.Update(ctx, in)
 		return nil, r, err
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "event_delete", Description: "Delete a verified non-recurring personal event using its current revision. Irreversible. Recurring events and invitations are refused to prevent unintended changes to other occurrences or participants.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.DeleteInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "event_delete", Description: "Delete a verified personal event, or one normal recurring occurrence. For a recurring series, pass occurrence exactly as returned by event_list plus the series event_id and latest expected_revision from event_get. Each deletion changes the series revision: reread before the next deletion. Other occurrences are preserved. Whole-series deletion, separately edited occurrences, and invitations are refused.", Annotations: write}, func(ctx context.Context, _ *mcp.CallToolRequest, in calendar.DeleteInput) (*mcp.CallToolResult, calendar.WriteResult, error) {
 		r, err := service.Delete(ctx, in)
 		return nil, r, err
 	})

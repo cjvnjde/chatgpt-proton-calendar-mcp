@@ -645,6 +645,15 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (WriteResult, erro
 		}
 		setTimes(e.shared[0], a, b, e.event.AllDay)
 	}
+	return s.writeEdited(ctx, e, ck, in.ReminderMinutes)
+}
+
+// writeEdited preserves existing encrypted card layout and unrelated metadata.
+func (s *Service) writeEdited(ctx context.Context, e opened, ck *proton.CalendarKeys, reminderMinutes *[]int) (WriteResult, error) {
+	raw := e.raw
+	if len(e.shared) != 2 || len(raw.SharedEvents) != 2 || raw.SharedEvents[0].Type != 2 || raw.SharedEvents[1].Type != 3 {
+		return WriteResult{}, errors.New("unsupported event card layout; refusing to rewrite it")
+	}
 	seq, _ := strconv.Atoi(prop(e.shared[0], "SEQUENCE"))
 	p := ical.NewProp("SEQUENCE")
 	p.Value = strconv.Itoa(seq + 1)
@@ -669,8 +678,8 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (WriteResult, erro
 	if len(notifications) == 0 {
 		notifications = json.RawMessage("null")
 	}
-	if in.ReminderMinutes != nil {
-		notifications, err = reminders(*in.ReminderMinutes)
+	if reminderMinutes != nil {
+		notifications, err = reminders(*reminderMinutes)
 		if err != nil {
 			return WriteResult{}, err
 		}
@@ -680,17 +689,18 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (WriteResult, erro
 		color = json.RawMessage("null")
 	}
 	object := map[string]any{"SharedEventContent": cards, "Notifications": notifications, "Color": color, "IsOrganizer": raw.IsOrganizer}
-	id, err := s.sync(ctx, in.CalendarID, ck.Member.ID, map[string]any{"ID": in.EventID, "Event": object})
+	id, err := s.sync(ctx, raw.CalendarID, ck.Member.ID, map[string]any{"ID": raw.ID, "Event": object})
 	if err != nil {
 		return WriteResult{}, err
 	}
-	if id != in.EventID {
+	if id != raw.ID {
 		return WriteResult{}, errors.New("update acknowledged a different event; inspect current state")
 	}
-	return WriteResult{id, in.CalendarID, e.event.UID, false}, nil
+	return WriteResult{id, raw.CalendarID, e.event.UID, false}, nil
 }
 
 type DeleteInput struct {
+	Occurrence       string `json:"occurrence,omitempty" jsonschema:"Exact occurrence value from event_list. Required for recurring series; deletes only that occurrence. Use the series event_id and its latest revision."`
 	CalendarID       string `json:"calendar_id"`
 	EventID          string `json:"event_id"`
 	ExpectedRevision string `json:"expected_revision"`
@@ -724,8 +734,11 @@ func (s *Service) Delete(ctx context.Context, in DeleteInput) (WriteResult, erro
 	if err := safeEdit(e); err != nil {
 		return WriteResult{}, err
 	}
-	if prop(e.model, "RRULE") != "" || prop(e.model, "RECURRENCE-ID") != "" {
-		return WriteResult{}, errors.New("recurring-event deletion needs occurrence-aware transactions; use Proton's UI")
+	if in.Occurrence != "" {
+		return s.deleteOccurrence(ctx, in, e, ck)
+	}
+	if prop(e.model, "RRULE") != "" || len(e.model.Props.Values("RDATE")) > 0 || prop(e.model, "RECURRENCE-ID") != "" {
+		return WriteResult{}, errors.New("recurring-event deletion requires occurrence from event_list; whole-series deletion is not supported")
 	}
 	if _, err := s.sync(ctx, in.CalendarID, ck.Member.ID, map[string]any{"ID": in.EventID}); err != nil {
 		return WriteResult{}, err

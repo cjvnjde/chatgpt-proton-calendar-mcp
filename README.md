@@ -13,7 +13,7 @@ Supports local stdio, authenticated Streamable HTTP, an optional OpenAI Secure M
 | `event_get` | Read a stored event and its revision/signature status. |
 | `event_create` | Create encrypted personal events, optional daily/weekly/monthly/yearly recurrence, and display reminders. Stable request IDs prevent duplicate submissions. |
 | `event_update` | Partial text, time, and reminder edits with a revision check. Preserve omitted properties and the existing encryption session key. |
-| `event_delete` | Delete verified non-recurring personal events with a revision check. |
+| `event_delete` | Delete verified personal events or individual normal recurring occurrences with a revision check. |
 | `event_changes` | Poll Proton's native created/updated/deleted event feed using a caller-owned cursor. |
 
 This is a first implementation, not a Proton-supported integration. No live account has been used to validate it yet. Synthetic tests exercise the native protocol and cryptographic round trips; use a dedicated test calendar before granting access to production calendars.
@@ -68,7 +68,7 @@ Monitoring is pull-based. The MCP server does not wake an inactive AI, create a 
 ## Current boundaries
 
 - Writes target personal events without attendees or an organizer. Invitation handling, participant emails, sharing, booking pages, calendar administration, and cross-calendar moves are not exposed.
-- Recurring series can be created and read. Text/reminder edits preserve the existing rule and exclusions. Rescheduling a series or occurrence, splitting a series, and deleting recurring events are explicitly refused pending implementation of Proton's occurrence transaction rules.
+- Recurring series can be created and read. Text/reminder edits preserve the existing rule and exclusions. Delete a normal recurring occurrence by passing its exact `occurrence` from `event_list`, the series ID, and a fresh revision from `event_get`. This adds an EXDATE and preserves other dates. Reread the revision between deletions. Whole-series deletion, deletion of separately edited occurrences, rescheduling, and splitting a series remain unsupported.
 - Date queries use an inclusive start and exclusive end, with at most 90 days per query. All-day end dates are exclusive. Provide RFC3339 timestamps with explicit offsets and an IANA timezone for timed recurring events.
 - IANA timezones are supported, with a bundled timezone database for legacy aliases such as `Europe/Kiev`; arbitrary custom VTIMEZONE definitions and `RANGE` overrides are refused. Dense subdaily rules and subdaily selectors are refused. Expansion and upstream pagination limits produce an error rather than a silently incomplete schedule.
 - Signatures are checked against this account's address keys. Events signed by other people can be read with `verified: false`; they cannot be edited/deleted. This is cryptographic verification against fetched account keys, not a Key Transparency implementation.
