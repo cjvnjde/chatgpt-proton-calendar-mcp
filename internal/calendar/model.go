@@ -109,14 +109,32 @@ func merge(parts []*ical.Component) (*ical.Component, error) {
 	return out, nil
 }
 
+// Report the timezone or property without exposing event dates or content.
+func eventDateTime(p *ical.Prop, loc *time.Location) (time.Time, error) {
+	value, err := p.DateTime(loc)
+	if err == nil {
+		return value, nil
+	}
+	zone := p.Params.Get(ical.PropTimezoneID)
+	if zone != "" && p.ValueType() != ical.ValueDate && !strings.HasSuffix(p.Value, "Z") {
+		if _, zoneErr := time.LoadLocation(zone); zoneErr != nil {
+			if len(zone) > 128 {
+				return time.Time{}, errors.New("unsupported event timezone (identifier too long)")
+			}
+			return time.Time{}, fmt.Errorf("unsupported event timezone %q in %s", zone, p.Name)
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid event date/time in %s", p.Name)
+}
+
 func span(c *ical.Component, loc *time.Location) (time.Time, time.Time, bool, error) {
 	p := c.Props.Get("DTSTART")
 	if p == nil {
 		return time.Time{}, time.Time{}, false, errors.New("event has no start")
 	}
-	start, err := p.DateTime(loc)
+	start, err := eventDateTime(p, loc)
 	if err != nil {
-		return time.Time{}, time.Time{}, false, errors.New("unsupported or invalid event timezone/date")
+		return time.Time{}, time.Time{}, false, err
 	}
 	allDay := p.ValueType() == ical.ValueDate
 	var end time.Time
@@ -124,7 +142,7 @@ func span(c *ical.Component, loc *time.Location) (time.Time, time.Time, bool, er
 		if (e.ValueType() == ical.ValueDate) != allDay {
 			return time.Time{}, time.Time{}, false, errors.New("event mixes dates and times")
 		}
-		end, err = e.DateTime(loc)
+		end, err = eventDateTime(e, loc)
 	} else if d := c.Props.Get("DURATION"); d != nil {
 		var dur time.Duration
 		dur, err = d.Duration()
@@ -134,7 +152,10 @@ func span(c *ical.Component, loc *time.Location) (time.Time, time.Time, bool, er
 	} else {
 		end = start
 	}
-	if err != nil || end.Before(start) {
+	if err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	if end.Before(start) {
 		return time.Time{}, time.Time{}, false, errors.New("invalid event duration")
 	}
 	return start, end, allDay, nil

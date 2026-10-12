@@ -14,3 +14,5 @@ jobs:
       - run: go test -race ./...
       - run: CGO_ENABLED=0 go build ./cmd/proton-calendar-mcp
       - run: docker build -t proton-calendar-mcp:ci .
+      - run: CGO_ENABLED=0 go test -c -o /tmp/proton-calendar-runtime.test ./cmd/proton-calendar-mcp
+      - run: docker run --rm --network none --read-only -v /tmp/proton-calendar-runtime.test:/tmp/runtime.test:ro --entrypoint /tmp/runtime.test proton-calendar-mcp:ci -test.run '^TestRuntimeTimezoneAliases$' -test.v

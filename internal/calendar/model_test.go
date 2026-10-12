@@ -56,3 +56,29 @@ func TestBadTimezoneAndDenseRecurrenceFail(t *testing.T) {
 		t.Fatal("dense recurrence accepted")
 	}
 }
+
+func TestLegacyKyivTimezone(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Kyiv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := openedText(t, "UID:legacy\r\nDTSTART;TZID=Europe/Kiev:20261019T090000\r\nDTEND;TZID=Europe/Kiev:20261019T100000\r\nRRULE:FREQ=WEEKLY;COUNT=2", loc)
+	events, err := expand(context.Background(), []opened{e}, time.Date(2026, 10, 18, 0, 0, 0, 0, loc), time.Date(2026, 10, 28, 0, 0, 0, 0, loc), loc)
+	if err != nil || len(events) != 2 {
+		t.Fatal(events, err)
+	}
+	if events[0].Start != "2026-10-19T09:00:00+03:00" || events[1].Start != "2026-10-26T09:00:00+02:00" {
+		t.Fatal(events)
+	}
+}
+
+func TestTimezoneErrorsAreSpecific(t *testing.T) {
+	c, err := parseCard("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:bad\r\nDTSTART;TZID=Mars/Olympus:20261019T090000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = span(c, time.UTC)
+	if err == nil || !strings.Contains(err.Error(), "Mars/Olympus") || !strings.Contains(err.Error(), "DTSTART") || strings.Contains(err.Error(), "20261019") {
+		t.Fatal(err)
+	}
+}

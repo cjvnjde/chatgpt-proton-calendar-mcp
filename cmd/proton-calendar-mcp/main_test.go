@@ -155,3 +155,24 @@ func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("Authorization", "Bearer "+b.token)
 	return http.DefaultTransport.RoundTrip(r)
 }
+
+// Also run this test binary inside the runtime image, whose OS data omits aliases.
+func TestRuntimeTimezoneAliases(t *testing.T) {
+	for _, zone := range []string{"Europe/Kyiv", "Europe/Kiev", "US/Eastern"} {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Fatalf("%s: %v", zone, err)
+		}
+		winter := time.Date(2026, 1, 15, 9, 0, 0, 0, loc)
+		summer := time.Date(2026, 7, 15, 9, 0, 0, 0, loc)
+		_, w := winter.Zone()
+		_, s := summer.Zone()
+		want := 2 * 3600
+		if zone == "US/Eastern" {
+			want = -5 * 3600
+		}
+		if w != want || s != want+3600 {
+			t.Fatalf("%s: incorrect winter/summer offsets: %d %d", zone, w, s)
+		}
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	_ "time/tzdata" // Include legacy IANA aliases missing from slim runtime images.
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/term"
